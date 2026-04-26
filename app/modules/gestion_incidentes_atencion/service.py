@@ -21,6 +21,7 @@ from app.modules.gestion_incidentes_atencion.repository import (
     get_prioridad_by_nombre,
     get_solicitud_aceptada_by_incidente_id,
     get_solicitud_aceptada_by_incidente_and_taller_id,
+    get_solicitudes_taller_disponibles,
     get_solicitud_taller_by_id,
     get_solicitud_taller_by_id_for_update,
     get_tecnico_by_id_for_update,
@@ -29,7 +30,6 @@ from app.modules.gestion_incidentes_atencion.repository import (
     get_unidad_movil_by_id_for_update,
     get_unidades_moviles_disponibles_by_taller_id,
     get_vehiculo_by_id_and_cliente,
-    get_incidentes_disponibles,
     update_tecnico_disponibilidad,
     update_incidente_estado_servicio_actual,
     update_solicitud_taller_respuesta,
@@ -126,6 +126,35 @@ def _to_respuesta_solicitud_atencion_response(
         accion=accion,
         estado_solicitud=solicitud_taller.estado_solicitud,
         fecha_respuesta=solicitud_taller.fecha_respuesta,
+        id_estado_servicio_actual=incidente.id_estado_servicio_actual,
+        estado_servicio_actual=incidente.estado_servicio_actual.nombre,
+    )
+
+
+def _to_incidente_disponible_response(
+    solicitud_taller,
+) -> IncidenteDisponibleResponse:
+    incidente = solicitud_taller.incidente
+    return IncidenteDisponibleResponse(
+        id_solicitud_taller=solicitud_taller.id_solicitud_taller,
+        id_incidente=solicitud_taller.id_incidente,
+        id_taller=solicitud_taller.id_taller,
+        distancia_km=solicitud_taller.distancia_km,
+        puntaje_asignacion=solicitud_taller.puntaje_asignacion,
+        estado_solicitud=solicitud_taller.estado_solicitud,
+        fecha_envio=solicitud_taller.fecha_envio,
+        fecha_respuesta=solicitud_taller.fecha_respuesta,
+        titulo=incidente.titulo,
+        descripcion_texto=incidente.descripcion_texto,
+        direccion_referencia=incidente.direccion_referencia,
+        latitud=incidente.latitud,
+        longitud=incidente.longitud,
+        fecha_reporte=incidente.fecha_reporte,
+        id_vehiculo=incidente.id_vehiculo,
+        id_tipo_incidente=incidente.id_tipo_incidente,
+        tipo_incidente=incidente.tipo_incidente.nombre,
+        id_prioridad=incidente.id_prioridad,
+        prioridad=incidente.prioridad.nombre,
         id_estado_servicio_actual=incidente.id_estado_servicio_actual,
         estado_servicio_actual=incidente.estado_servicio_actual.nombre,
     )
@@ -412,28 +441,13 @@ def get_mis_incidentes_service(
 
 
 
-def get_incidentes_disponibles_service(db: Session) -> list[IncidenteDisponibleResponse]:
-    incidentes = get_incidentes_disponibles(db)
-
-    return [
-        IncidenteDisponibleResponse(
-            id_incidente=incidente.id_incidente,
-            titulo=incidente.titulo,
-            descripcion_texto=incidente.descripcion_texto,
-            direccion_referencia=incidente.direccion_referencia,
-            latitud=incidente.latitud,
-            longitud=incidente.longitud,
-            fecha_reporte=incidente.fecha_reporte,
-            id_vehiculo=incidente.id_vehiculo,
-            id_tipo_incidente=incidente.id_tipo_incidente,
-            tipo_incidente=incidente.tipo_incidente.nombre,
-            id_prioridad=incidente.id_prioridad,
-            prioridad=incidente.prioridad.nombre,
-            id_estado_servicio_actual=incidente.id_estado_servicio_actual,
-            estado_servicio_actual=incidente.estado_servicio_actual.nombre,
-        )
-        for incidente in incidentes
-    ]
+def get_incidentes_disponibles_service(
+    db: Session,
+    current_user,
+) -> list[IncidenteDisponibleResponse]:
+    taller = _get_taller_actor_service(db, current_user)
+    solicitudes = get_solicitudes_taller_disponibles(db, taller.id_taller)
+    return [_to_incidente_disponible_response(solicitud) for solicitud in solicitudes]
 
 
 def get_solicitud_atencion_detalle_service(

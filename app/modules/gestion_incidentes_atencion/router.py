@@ -86,7 +86,7 @@ def get_incidentes_disponibles(
     db: Session = Depends(get_db),
 ):
     try:
-        return get_incidentes_disponibles_service(db)
+        return get_incidentes_disponibles_service(db, current_user)
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

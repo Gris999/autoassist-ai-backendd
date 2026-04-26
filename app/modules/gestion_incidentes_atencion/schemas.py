@@ -36,7 +36,14 @@ class IncidenteResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 class IncidenteDisponibleResponse(BaseModel):
+    id_solicitud_taller: int
     id_incidente: int
+    id_taller: int
+    distancia_km: Decimal | None = None
+    puntaje_asignacion: Decimal | None = None
+    estado_solicitud: str
+    fecha_envio: datetime
+    fecha_respuesta: datetime | None = None
     titulo: str
     descripcion_texto: str | None = None
     direccion_referencia: str | None = None

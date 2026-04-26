@@ -108,18 +108,24 @@ def get_incidente_by_id_and_cliente(db: Session, id_incidente: int, id_cliente: 
         )
     ).scalar_one_or_none()
 
-def get_incidentes_disponibles(db: Session) -> list[Incidente]:
+def get_solicitudes_taller_disponibles(db: Session, id_taller: int) -> list[SolicitudTaller]:
     return db.execute(
-        select(Incidente)
+        select(SolicitudTaller)
+        .join(SolicitudTaller.incidente)
+        .join(Incidente.estado_servicio_actual)
         .options(
-            joinedload(Incidente.tipo_incidente),
-            joinedload(Incidente.prioridad),
-            joinedload(Incidente.estado_servicio_actual),
+            joinedload(SolicitudTaller.incidente).joinedload(Incidente.tipo_incidente),
+            joinedload(SolicitudTaller.incidente).joinedload(Incidente.prioridad),
+            joinedload(SolicitudTaller.incidente).joinedload(Incidente.estado_servicio_actual),
         )
         .where(
-            Incidente.asignacion_servicio == None,  # noqa: E711
+            SolicitudTaller.id_taller == id_taller,
+            SolicitudTaller.estado_solicitud == "PENDIENTE",
+            EstadoServicio.nombre.notin_(
+                ["ASIGNADO", "EN_CAMINO", "EN_ATENCION", "FINALIZADO", "CANCELADO"]
+            ),
         )
-        .order_by(Incidente.fecha_reporte.desc())
+        .order_by(SolicitudTaller.fecha_envio.desc())
     ).scalars().all()
 
 
