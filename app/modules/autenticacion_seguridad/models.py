@@ -1,4 +1,5 @@
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import (
     BigInteger,
@@ -13,7 +14,8 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.db.session import Base
-
+def ahora_bolivia() -> datetime:
+    return datetime.now(ZoneInfo("America/La_Paz")).replace(tzinfo=None)
 
 class Usuario(Base):
     __tablename__ = "usuario"
@@ -32,7 +34,7 @@ class Usuario(Base):
     fecha_registro: Mapped[datetime] = mapped_column(
         DateTime,
         nullable=False,
-        default=datetime.utcnow,
+        default=ahora_bolivia,
     )
 
     usuario_roles: Mapped[list["UsuarioRol"]] = relationship(
@@ -102,9 +104,9 @@ class BitacoraSistema(Base):
     modulo: Mapped[str] = mapped_column(String(100), nullable=False)
     descripcion: Mapped[str | None] = mapped_column(Text, nullable=True)
     fecha_hora: Mapped[datetime] = mapped_column(
-        DateTime,
-        nullable=False,
-        default=datetime.utcnow,
+    DateTime,
+    nullable=False,
+    default=ahora_bolivia,
     )
     ip_origen: Mapped[str | None] = mapped_column(String(45), nullable=True)
 
