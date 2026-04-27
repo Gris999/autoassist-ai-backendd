@@ -111,3 +111,4 @@ class AsignacionInteligenteResponse(BaseModel):
     candidatos: list[TallerCandidatoResponse]
     total_candidatos: int
     mensaje: str
+
