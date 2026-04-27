@@ -36,6 +36,9 @@ class Notificacion(Base):
     mensaje: Mapped[str] = mapped_column(Text, nullable=False)
     tipo_notificacion: Mapped[str] = mapped_column(String(50), nullable=False)
     leido: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    push_estado: Mapped[str] = mapped_column(String(50), nullable=False, default="PENDIENTE")
+    push_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fecha_envio_push: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     fecha_envio: Mapped[datetime] = mapped_column(
         DateTime,
         nullable=False,
@@ -44,6 +47,36 @@ class Notificacion(Base):
 
     usuario = relationship("Usuario")
     incidente = relationship("Incidente")
+
+
+class DispositivoPushUsuario(Base):
+    __tablename__ = "dispositivo_push_usuario"
+
+    id_dispositivo_push: Mapped[int] = mapped_column(
+        BigInteger,
+        Identity(),
+        primary_key=True,
+    )
+    id_usuario: Mapped[int] = mapped_column(
+        ForeignKey("usuario.id_usuario"),
+        nullable=False,
+    )
+    token_push: Mapped[str] = mapped_column(String(500), nullable=False, unique=True)
+    plataforma: Mapped[str] = mapped_column(String(30), nullable=False)
+    proveedor: Mapped[str] = mapped_column(String(30), nullable=False, default="EXPO")
+    activo: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    fecha_registro: Mapped[datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        default=datetime.utcnow,
+    )
+    fecha_actualizacion: Mapped[datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        default=datetime.utcnow,
+    )
+
+    usuario = relationship("Usuario")
 
 
 class PagoServicio(Base):

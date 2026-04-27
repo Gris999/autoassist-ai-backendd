@@ -39,6 +39,9 @@ from app.modules.inteligencia_gestion_estrategica.schemas import (
     TallerCandidatoResponse,
     TallerRecomendadoResponse,
 )
+from app.modules.seguimiento_monitoreo_servicio.service import (
+    dispatch_push_notification_service,
+)
 
 
 KEYWORDS_BY_CATEGORY: dict[str, tuple[str, ...]] = {
@@ -1249,6 +1252,7 @@ def solicitar_mas_informacion_incidente_service(
             mensaje=mensaje_notificacion,
             tipo_notificacion="SOLICITUD_MAS_INFORMACION",
         )
+        dispatch_push_notification_service(db, notification)
         db.commit()
         return SolicitudMasInformacionResponse(
             id_incidente=incidente.id_incidente,

@@ -33,6 +33,12 @@ class Settings(BaseSettings):
     STRIPE_CURRENCY: str = "usd"
     STRIPE_TIMEOUT_SECONDS: float = 30.0
     PLATFORM_COMMISSION_PERCENTAGE: float = 10.0
+    PUSH_PROVIDER: str = "disabled"
+    EXPO_PUSH_URL: str = "https://exp.host/--/api/v2/push/send"
+    PUSH_TIMEOUT_SECONDS: float = 10.0
+    FIREBASE_PROJECT_ID: str | None = None
+    FIREBASE_SERVICE_ACCOUNT_FILE: str | None = None
+    FIREBASE_SERVICE_ACCOUNT_JSON: str | None = None
 
     model_config = SettingsConfigDict(
         env_file=".env",

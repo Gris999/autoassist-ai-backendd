@@ -14,6 +14,8 @@ from app.modules.seguimiento_monitoreo_servicio.schemas import (
     ConfirmarPagoDemoRequest,
     ComprobantePagoResponse,
     CrearIntencionPagoRequest,
+    DispositivoPushRegisterRequest,
+    DispositivoPushResponse,
     EstadoServicioDetalleResponse,
     IncidenteHistorialDetailResponse,
     IncidenteHistorialListResponse,
@@ -34,7 +36,9 @@ from app.modules.seguimiento_monitoreo_servicio.service import (
     confirmar_pago_demo_service,
     consultar_asignacion_auxilio_service,
     crear_intencion_pago_service,
+    desactivar_dispositivo_push_service,
     get_estado_servicio_service,
+    listar_dispositivos_push_service,
     listar_incidentes_historial_service,
     listar_incidentes_cliente_service,
     listar_notificaciones_service,
@@ -44,6 +48,7 @@ from app.modules.seguimiento_monitoreo_servicio.service import (
     obtener_historial_incidente_service,
     obtener_notificacion_service,
     procesar_webhook_stripe_service,
+    registrar_dispositivo_push_service,
     validar_acceso_incidente_seguimiento_service,
 )
 
@@ -273,6 +278,62 @@ def listar_notificaciones(
 ):
     try:
         return listar_notificaciones_service(db, current_user)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e),
+        )
+
+
+@router.post(
+    "/dispositivos-push",
+    response_model=DispositivoPushResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def registrar_dispositivo_push(
+    payload: DispositivoPushRegisterRequest,
+    current_user: Usuario = Depends(require_roles("CLIENTE", "TALLER", "TECNICO")),
+    db: Session = Depends(get_db),
+):
+    try:
+        return registrar_dispositivo_push_service(db, current_user, payload)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
+
+@router.get(
+    "/dispositivos-push",
+    response_model=list[DispositivoPushResponse],
+    status_code=status.HTTP_200_OK,
+)
+def listar_dispositivos_push(
+    current_user: Usuario = Depends(require_roles("CLIENTE", "TALLER", "TECNICO")),
+    db: Session = Depends(get_db),
+):
+    try:
+        return listar_dispositivos_push_service(db, current_user)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
+
+@router.delete(
+    "/dispositivos-push",
+    response_model=DispositivoPushResponse,
+    status_code=status.HTTP_200_OK,
+)
+def desactivar_dispositivo_push(
+    token_push: str = Query(..., min_length=10, max_length=500),
+    current_user: Usuario = Depends(require_roles("CLIENTE", "TALLER", "TECNICO")),
+    db: Session = Depends(get_db),
+):
+    try:
+        return desactivar_dispositivo_push_service(db, current_user, token_push)
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

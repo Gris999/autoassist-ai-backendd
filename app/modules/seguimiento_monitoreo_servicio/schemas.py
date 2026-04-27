@@ -112,6 +112,22 @@ class NotificacionCreateRequest(BaseModel):
     tipo_notificacion: str
 
 
+class DispositivoPushRegisterRequest(BaseModel):
+    token_push: str = Field(min_length=10, max_length=500)
+    plataforma: str = Field(min_length=2, max_length=30)
+    proveedor: str = Field(default="FCM", min_length=2, max_length=30)
+
+
+class DispositivoPushResponse(BaseModel):
+    id_dispositivo_push: int
+    token_push: str
+    plataforma: str
+    proveedor: str
+    activo: bool
+    fecha_registro: datetime
+    fecha_actualizacion: datetime
+
+
 class NotificacionListResponse(BaseModel):
     id_notificacion: int
     id_incidente: int | None = None
@@ -119,6 +135,9 @@ class NotificacionListResponse(BaseModel):
     mensaje: str
     tipo_notificacion: str
     leido: bool
+    push_estado: str
+    push_error: str | None = None
+    fecha_envio_push: datetime | None = None
     fecha_envio: datetime
 
 
@@ -130,6 +149,9 @@ class NotificacionDetailResponse(BaseModel):
     mensaje: str
     tipo_notificacion: str
     leido: bool
+    push_estado: str
+    push_error: str | None = None
+    fecha_envio_push: datetime | None = None
     fecha_envio: datetime
 
 
