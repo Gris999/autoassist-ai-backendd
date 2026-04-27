@@ -13,8 +13,11 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:4200",
+        "https://autoassist-ai-webb.vercel.app",
+        "https://autoassist-ai-webb-27x0lj606-pedroalaca83-9867s-projects.vercel.app",
+        "https://autoassist-ai-webb-rlfgvcp5m-pedroalaca83-9867s-projects.vercel.app",
     ],
-    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
+    allow_origin_regex=r"^https://.*\.vercel\.app$|^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

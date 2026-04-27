@@ -13,30 +13,49 @@ from app.modules.gestion_incidentes_atencion.schemas import (
     IncidenteAsignadoDetailResponse,
     IncidenteAsignadoListResponse,
     IncidenteCreateRequest,
-    IncidenteResponse,
     IncidenteDisponibleResponse,
+    IncidenteResponse,
     ResponderSolicitudAtencionRequest,
     RespuestaSolicitudAtencionResponse,
     SolicitudAtencionDetalleResponse,
     TecnicoDisponibleAsignacionResponse,
+    TipoIncidenteResponse,
     UnidadMovilDisponibleAsignacionResponse,
 )
 from app.modules.gestion_incidentes_atencion.service import (
     actualizar_estado_servicio_incidente_service,
     asignar_tecnico_unidad_incidente_service,
     get_estado_servicio_incidente_service,
+    get_incidentes_disponibles_service,
     get_mis_incidentes_service,
+    get_solicitud_atencion_detalle_service,
     listar_incidentes_asignados_tecnico_service,
     listar_tecnicos_disponibles_para_incidente_service,
+    listar_tipos_incidente_service,
     listar_unidades_moviles_disponibles_para_incidente_service,
     obtener_incidente_asignado_tecnico_service,
-    get_solicitud_atencion_detalle_service,
     report_incidente_service,
-    get_incidentes_disponibles_service,
     responder_solicitud_atencion_service,
 )
 
-router = APIRouter(prefix="/incidentes", tags=["Gestión Incidentes y Atención"])
+router = APIRouter(prefix="/incidentes", tags=["Gestion Incidentes y Atencion"])
+
+
+@router.get(
+    "/tipos-incidente",
+    response_model=list[TipoIncidenteResponse],
+    status_code=status.HTTP_200_OK,
+)
+def listar_tipos_incidente(
+    db: Session = Depends(get_db),
+):
+    try:
+        return listar_tipos_incidente_service(db)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
 
 
 @router.post(
@@ -74,7 +93,7 @@ def get_mis_incidentes(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
-    
+
 
 @router.get(
     "/disponibles",

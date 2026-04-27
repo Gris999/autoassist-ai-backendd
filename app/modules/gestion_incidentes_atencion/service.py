@@ -27,6 +27,7 @@ from app.modules.gestion_incidentes_atencion.repository import (
     get_tecnico_by_id_for_update,
     get_tecnicos_disponibles_by_taller_id,
     get_tipo_incidente_by_id,
+    list_tipos_incidente,
     get_unidad_movil_by_id_for_update,
     get_unidades_moviles_disponibles_by_taller_id,
     get_vehiculo_by_id_and_cliente,
@@ -52,6 +53,7 @@ from app.modules.gestion_incidentes_atencion.schemas import (
     RespuestaSolicitudAtencionResponse,
     SolicitudAtencionDetalleResponse,
     TecnicoDisponibleAsignacionResponse,
+    TipoIncidenteResponse,
     UnidadMovilDisponibleAsignacionResponse,
 )
 
@@ -426,6 +428,11 @@ def report_incidente_service(
     except Exception:
         db.rollback()
         raise
+
+
+def listar_tipos_incidente_service(db: Session) -> list[TipoIncidenteResponse]:
+    tipos = list_tipos_incidente(db)
+    return [TipoIncidenteResponse.model_validate(tipo) for tipo in tipos]
 
 
 def get_mis_incidentes_service(

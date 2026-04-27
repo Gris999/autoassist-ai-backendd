@@ -1,17 +1,23 @@
+import json
 import unicodedata
 from decimal import Decimal
 from math import asin, cos, radians, sin, sqrt
 
+import httpx
 from sqlalchemy.orm import Session
 
+from app.core.config.settings import settings
 from app.modules.inteligencia_gestion_estrategica.repository import (
     create_solicitud_taller,
     create_processed_evidence,
     create_notification,
     get_cliente_by_id,
+    get_evidencia_by_id_and_incidente_id,
     get_evidencia_textos_by_incidente_id,
     get_incidente_by_id,
     get_incidente_with_assignment_context,
+    get_latest_image_evidence_by_incidente_id,
+    get_prioridad_by_nombre,
     get_pending_notification_by_incidente_usuario_tipo,
     get_solicitud_taller_by_incidente_and_taller,
     get_usuario_by_id,
@@ -21,7 +27,10 @@ from app.modules.inteligencia_gestion_estrategica.repository import (
     update_incidente_analysis_result,
 )
 from app.modules.inteligencia_gestion_estrategica.schemas import (
+    AnalisisImagenRoboflowResponse,
+    AnalizarImagenIncidenteRequest,
     AnalisisIncidenteManualRequest,
+    AnalisisIncidenteLLMResult,
     AnalisisIncidenteResponse,
     AsignacionInteligenteResponse,
     EvidenciaProcesadaResponse,
@@ -151,9 +160,14 @@ CLASSIFICATION_SERVICE_KEYWORDS = {
     "llave": ("llave", "cerrajeria", "apertura"),
 }
 
+ALLOWED_INCIDENT_CATEGORIES = tuple(KEYWORDS_BY_CATEGORY.keys()) + ("incierto",)
+ALLOWED_PRIORITIES = ("baja", "media", "alta", "critica")
+
 ESTADOS_SOLICITUD_EXCLUIDOS = {"RECHAZADA"}
 ESTADOS_INCIDENTE_NO_APTOS_PARA_ASIGNACION = {"FINALIZADO", "CANCELADO"}
 ESTADO_SOLICITUD_INTELIGENTE = "PENDIENTE"
+ROBOFLOW_IMAGE_EVIDENCE_TYPES = {"IMAGEN", "FOTO", "IMAGE"}
+ROBOFLOW_SUPPORTED_TASK_TYPES = {"classification", "object-detection"}
 
 
 class IncidentNotFoundError(LookupError):
@@ -192,9 +206,158 @@ class NoCandidateTallerFoundError(LookupError):
     pass
 
 
+class ImageEvidenceNotFoundError(LookupError):
+    pass
+
+
+class RoboflowConfigurationError(ValueError):
+    pass
+
+
 def _normalize_text(text: str) -> str:
     normalized = unicodedata.normalize("NFKD", text.lower())
     return "".join(char for char in normalized if not unicodedata.combining(char))
+
+
+def _normalize_roboflow_task_type() -> str:
+    task_type = settings.ROBOFLOW_TASK_TYPE.strip().lower()
+    if task_type not in ROBOFLOW_SUPPORTED_TASK_TYPES:
+        raise RoboflowConfigurationError(
+            "ROBOFLOW_TASK_TYPE invalido. Use classification u object-detection."
+        )
+    return task_type
+
+
+def _is_image_evidence(evidencia) -> bool:
+    evidence_type = (evidencia.tipo_evidencia or "").strip().upper()
+    return evidence_type in ROBOFLOW_IMAGE_EVIDENCE_TYPES and bool(
+        (evidencia.archivo_url or "").strip()
+    )
+
+
+def _extract_image_label_category(raw_label: str) -> str:
+    normalized_label = _normalize_text(raw_label)
+    if any(keyword in normalized_label for keyword in ("battery", "bateria", "tablero", "electrico", "starter")):
+        return "bateria"
+    if any(keyword in normalized_label for keyword in ("tire", "tyre", "llanta", "wheel", "neumatico", "puncture", "pinch")):
+        return "llanta"
+    if any(keyword in normalized_label for keyword in ("crash", "collision", "choque", "bumper", "frontal", "impact", "damage_front")):
+        return "choque"
+    if any(keyword in normalized_label for keyword in ("engine", "motor", "smoke", "humo", "oil", "overheat", "fuga")):
+        return "motor"
+    if any(keyword in normalized_label for keyword in ("fuel", "combustible", "gas", "gasolina")):
+        return "combustible"
+    if any(keyword in normalized_label for keyword in ("key", "llave", "lock", "cerradura", "door")):
+        return "llave"
+    return "incierto"
+
+
+def _summarize_roboflow_predictions(
+    *,
+    task_type: str,
+    payload: dict,
+) -> tuple[str, float, list[str]]:
+    if task_type == "classification":
+        raw_predictions = payload.get("predictions", [])
+        normalized_predictions: list[tuple[str, float]] = []
+        if isinstance(raw_predictions, list):
+            for prediction in raw_predictions:
+                label = str(prediction.get("class", "")).strip()
+                confidence = float(prediction.get("confidence", 0.0) or 0.0)
+                if label:
+                    normalized_predictions.append((label, confidence))
+        elif isinstance(raw_predictions, dict):
+            for label, value in raw_predictions.items():
+                confidence = float((value or {}).get("confidence", 0.0) or 0.0)
+                normalized_predictions.append((str(label).strip(), confidence))
+
+        normalized_predictions.sort(key=lambda item: item[1], reverse=True)
+        top_label = str(payload.get("top") or (normalized_predictions[0][0] if normalized_predictions else "incierto"))
+        top_confidence = float(payload.get("confidence") or (normalized_predictions[0][1] if normalized_predictions else 0.0))
+        detections = [
+            f"{label} ({confidence:.2f})"
+            for label, confidence in normalized_predictions[:5]
+        ]
+        return top_label, round(min(max(top_confidence, 0.0), 1.0), 2), detections
+
+    raw_predictions = payload.get("predictions", [])
+    normalized_predictions = []
+    for prediction in raw_predictions:
+        label = str(prediction.get("class", "")).strip()
+        confidence = float(prediction.get("confidence", 0.0) or 0.0)
+        if label:
+            normalized_predictions.append((label, confidence))
+
+    normalized_predictions.sort(key=lambda item: item[1], reverse=True)
+    top_label = normalized_predictions[0][0] if normalized_predictions else "incierto"
+    top_confidence = normalized_predictions[0][1] if normalized_predictions else 0.0
+    detections = [
+        f"{label} ({confidence:.2f})"
+        for label, confidence in normalized_predictions[:5]
+    ]
+    return top_label, round(min(max(top_confidence, 0.0), 1.0), 2), detections
+
+
+def _build_roboflow_visual_summary(
+    *,
+    task_type: str,
+    top_label: str,
+    confidence: float,
+    detections: list[str],
+    categoria_sugerida: str,
+) -> str:
+    summary_parts = [
+        "Analisis visual Roboflow detecta evidencia relacionada con "
+        f"'{top_label}' con confianza {confidence:.2f}.",
+        f"Categoria sugerida para el incidente: {categoria_sugerida}.",
+    ]
+    if task_type == "object-detection" and detections:
+        summary_parts.append(
+            "Detecciones principales: " + ", ".join(detections[:5]) + "."
+        )
+    elif detections:
+        summary_parts.append(
+            "Clasificaciones probables: " + ", ".join(detections[:5]) + "."
+        )
+    return " ".join(summary_parts)
+
+
+def _run_roboflow_image_analysis(*, image_url: str) -> tuple[str, str, float, str, list[str]]:
+    if not settings.ROBOFLOW_API_KEY or not settings.ROBOFLOW_MODEL_ID:
+        raise RoboflowConfigurationError(
+            "ROBOFLOW_API_KEY y ROBOFLOW_MODEL_ID deben estar configuradas."
+        )
+
+    task_type = _normalize_roboflow_task_type()
+    api_url = (
+        "https://classify.roboflow.com"
+        if task_type == "classification"
+        else "https://detect.roboflow.com"
+    )
+    response = httpx.post(
+        f"{api_url}/{settings.ROBOFLOW_MODEL_ID}",
+        params={
+            "api_key": settings.ROBOFLOW_API_KEY,
+            "image": image_url,
+        },
+        timeout=settings.ROBOFLOW_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+
+    payload = response.json()
+    top_label, confidence, detections = _summarize_roboflow_predictions(
+        task_type=task_type,
+        payload=payload,
+    )
+    categoria_sugerida = _extract_image_label_category(top_label)
+    resumen_visual = _build_roboflow_visual_summary(
+        task_type=task_type,
+        top_label=top_label,
+        confidence=confidence,
+        detections=detections,
+        categoria_sugerida=categoria_sugerida,
+    )
+    return task_type, top_label, confidence, categoria_sugerida, [resumen_visual, *detections]
 
 
 def _clean_texts(texts: list[str | None]) -> list[str]:
@@ -310,6 +473,345 @@ def _build_summary(
     return " ".join(summary_parts)
 
 
+def _normalize_llm_category(value: str | None) -> str:
+    normalized = _normalize_text((value or "").strip())
+    if normalized in ALLOWED_INCIDENT_CATEGORIES:
+        return normalized
+    return "incierto"
+
+
+def _normalize_llm_priority(value: str | None) -> str:
+    normalized = _normalize_text((value or "").strip())
+    if normalized in ALLOWED_PRIORITIES:
+        return normalized
+    return "baja"
+
+
+def _normalize_llm_questions(questions: list[str] | None, *, requires_more_info: bool) -> list[str]:
+    if not requires_more_info:
+        return []
+    if not questions:
+        return []
+    cleaned = []
+    for question in questions:
+        if not question:
+            continue
+        normalized_question = question.strip()
+        if normalized_question:
+            cleaned.append(normalized_question[:250])
+    return cleaned[:5]
+
+
+def _build_llm_input_payload(
+    *,
+    descripcion_texto: str | None,
+    texto_evidencias: list[str],
+    latitud: Decimal | None,
+    longitud: Decimal | None,
+) -> str:
+    partes = [
+        "Analiza el incidente vehicular y responde SOLO JSON valido.",
+        "Debes clasificar el incidente, estimar prioridad, resumirlo y decidir si requiere mas informacion.",
+        f"Descripcion del incidente: {descripcion_texto or 'Sin descripcion'}",
+        f"Latitud: {latitud if latitud is not None else 'No disponible'}",
+        f"Longitud: {longitud if longitud is not None else 'No disponible'}",
+        "Textos extraidos de evidencias:",
+    ]
+
+    if texto_evidencias:
+        for index, evidencia in enumerate(texto_evidencias, start=1):
+            partes.append(f"{index}. {evidencia}")
+    else:
+        partes.append("No hay textos extraidos de evidencias.")
+
+    partes.extend(
+        [
+            "Categorias validas: bateria, llanta, choque, motor, combustible, llave, incierto.",
+            "Prioridades validas: baja, media, alta, critica.",
+            "Si no hay suficiente informacion, usa clasificacion 'incierto' y requiere_mas_info=true.",
+            "Si requiere_mas_info=false, devuelve preguntas_sugeridas vacio.",
+        ]
+    )
+    return "\n".join(partes)
+
+
+def _get_llm_analysis_schema() -> dict:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "clasificacion_ia": {
+                "type": "string",
+                "enum": list(ALLOWED_INCIDENT_CATEGORIES),
+            },
+            "confianza_clasificacion": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1,
+            },
+            "prioridad": {
+                "type": "string",
+                "enum": list(ALLOWED_PRIORITIES),
+            },
+            "resumen_ia": {
+                "type": "string",
+            },
+            "requiere_mas_info": {
+                "type": "boolean",
+            },
+            "preguntas_sugeridas": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+        },
+        "required": [
+            "clasificacion_ia",
+            "confianza_clasificacion",
+            "prioridad",
+            "resumen_ia",
+            "requiere_mas_info",
+            "preguntas_sugeridas",
+        ],
+    }
+
+
+def _run_gemini_incident_analysis(
+    *,
+    descripcion_texto: str | None,
+    texto_evidencias: list[str],
+    latitud: Decimal | None,
+    longitud: Decimal | None,
+) -> AnalisisIncidenteLLMResult:
+    if not settings.GEMINI_API_KEY:
+        raise ValueError("GEMINI_API_KEY no configurada.")
+
+    response = httpx.post(
+        f"https://generativelanguage.googleapis.com/v1beta/models/{settings.GEMINI_MODEL}:generateContent",
+        headers={
+            "x-goog-api-key": settings.GEMINI_API_KEY,
+            "Content-Type": "application/json",
+        },
+        json={
+            "system_instruction": {
+                "parts": [
+                    {
+                        "text": (
+                            "Eres un analizador de incidentes vehiculares para AutoAssist AI. "
+                            "Debes responder estrictamente en JSON siguiendo el esquema solicitado."
+                        )
+                    }
+                ]
+            },
+            "contents": [
+                {
+                    "parts": [
+                        {
+                            "text": _build_llm_input_payload(
+                                descripcion_texto=descripcion_texto,
+                                texto_evidencias=texto_evidencias,
+                                latitud=latitud,
+                                longitud=longitud,
+                            )
+                        }
+                    ]
+                }
+            ],
+            "generationConfig": {
+                "responseMimeType": "application/json",
+                "responseJsonSchema": _get_llm_analysis_schema(),
+            },
+        },
+        timeout=settings.GEMINI_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+
+    response_payload = response.json()
+    text_payload = (
+        response_payload.get("candidates", [{}])[0]
+        .get("content", {})
+        .get("parts", [{}])[0]
+        .get("text")
+    )
+    if not text_payload:
+        raise ValueError("Gemini no devolvio un cuerpo JSON util para el analisis.")
+
+    parsed_result = AnalisisIncidenteLLMResult.model_validate(json.loads(text_payload))
+    normalized_category = _normalize_llm_category(parsed_result.clasificacion_ia)
+    normalized_priority = _normalize_llm_priority(parsed_result.prioridad)
+    requires_more_info = bool(parsed_result.requiere_mas_info)
+    confidence = round(min(max(parsed_result.confianza_clasificacion, 0.0), 1.0), 2)
+
+    preguntas_sugeridas = _normalize_llm_questions(
+        parsed_result.preguntas_sugeridas,
+        requires_more_info=requires_more_info,
+    )
+    if requires_more_info and not preguntas_sugeridas:
+        preguntas_sugeridas = _suggest_questions(normalized_category, True)
+
+    return AnalisisIncidenteLLMResult(
+        clasificacion_ia=normalized_category,
+        confianza_clasificacion=confidence,
+        prioridad=normalized_priority,
+        resumen_ia=parsed_result.resumen_ia.strip(),
+        requiere_mas_info=requires_more_info,
+        preguntas_sugeridas=preguntas_sugeridas,
+    )
+
+
+def _run_openai_incident_analysis(
+    *,
+    descripcion_texto: str | None,
+    texto_evidencias: list[str],
+    latitud: Decimal | None,
+    longitud: Decimal | None,
+) -> AnalisisIncidenteLLMResult:
+    if not settings.OPENAI_API_KEY:
+        raise ValueError("OPENAI_API_KEY no configurada.")
+
+    try:
+        from openai import OpenAI
+    except ImportError as exc:
+        raise RuntimeError("La libreria openai no esta instalada.") from exc
+
+    client = OpenAI(
+        api_key=settings.OPENAI_API_KEY,
+        timeout=settings.OPENAI_TIMEOUT_SECONDS,
+    )
+
+    response = client.responses.create(
+        model=settings.OPENAI_MODEL,
+        instructions=(
+            "Eres un analizador de incidentes vehiculares para AutoAssist AI. "
+            "Debes responder estrictamente en JSON siguiendo el esquema solicitado."
+        ),
+        input=_build_llm_input_payload(
+            descripcion_texto=descripcion_texto,
+            texto_evidencias=texto_evidencias,
+            latitud=latitud,
+            longitud=longitud,
+        ),
+        text={
+            "format": {
+                "type": "json_schema",
+                "name": "analisis_incidente",
+                "strict": True,
+                "schema": _get_llm_analysis_schema(),
+            }
+        },
+    )
+
+    parsed_result = AnalisisIncidenteLLMResult.model_validate_json(response.output_text)
+    normalized_category = _normalize_llm_category(parsed_result.clasificacion_ia)
+    normalized_priority = _normalize_llm_priority(parsed_result.prioridad)
+    requires_more_info = bool(parsed_result.requiere_mas_info)
+    confidence = round(min(max(parsed_result.confianza_clasificacion, 0.0), 1.0), 2)
+
+    preguntas_sugeridas = _normalize_llm_questions(
+        parsed_result.preguntas_sugeridas,
+        requires_more_info=requires_more_info,
+    )
+    if requires_more_info and not preguntas_sugeridas:
+        preguntas_sugeridas = _suggest_questions(normalized_category, True)
+
+    return AnalisisIncidenteLLMResult(
+        clasificacion_ia=normalized_category,
+        confianza_clasificacion=confidence,
+        prioridad=normalized_priority,
+        resumen_ia=parsed_result.resumen_ia.strip(),
+        requiere_mas_info=requires_more_info,
+        preguntas_sugeridas=preguntas_sugeridas,
+    )
+
+
+def _extract_json_from_text(raw_text: str) -> dict:
+    content = raw_text.strip()
+    if content.startswith("```"):
+        parts = content.split("```")
+        if len(parts) >= 2:
+            content = parts[1]
+            if content.lower().startswith("json"):
+                content = content[4:]
+            content = content.strip()
+    return json.loads(content)
+
+
+def _run_openrouter_incident_analysis(
+    *,
+    descripcion_texto: str | None,
+    texto_evidencias: list[str],
+    latitud: Decimal | None,
+    longitud: Decimal | None,
+) -> AnalisisIncidenteLLMResult:
+    if not settings.OPENROUTER_API_KEY:
+        raise ValueError("OPENROUTER_API_KEY no configurada.")
+
+    try:
+        from openai import OpenAI
+    except ImportError as exc:
+        raise RuntimeError("La libreria openai no esta instalada.") from exc
+
+    client = OpenAI(
+        api_key=settings.OPENROUTER_API_KEY,
+        base_url="https://openrouter.ai/api/v1",
+        timeout=settings.OPENROUTER_TIMEOUT_SECONDS,
+        default_headers={
+            "HTTP-Referer": settings.OPENROUTER_APP_URL,
+            "X-Title": settings.OPENROUTER_APP_NAME,
+        },
+    )
+
+    completion = client.chat.completions.create(
+        model=settings.OPENROUTER_MODEL,
+        temperature=0,
+        response_format={"type": "json_object"},
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "Eres un analizador de incidentes vehiculares para AutoAssist AI. "
+                    "Responde unicamente JSON valido con estas claves exactas: "
+                    "clasificacion_ia, confianza_clasificacion, prioridad, resumen_ia, "
+                    "requiere_mas_info, preguntas_sugeridas."
+                ),
+            },
+            {
+                "role": "user",
+                "content": _build_llm_input_payload(
+                    descripcion_texto=descripcion_texto,
+                    texto_evidencias=texto_evidencias,
+                    latitud=latitud,
+                    longitud=longitud,
+                ),
+            },
+        ],
+    )
+
+    raw_text = completion.choices[0].message.content or "{}"
+    parsed_result = AnalisisIncidenteLLMResult.model_validate(
+        _extract_json_from_text(raw_text)
+    )
+    normalized_category = _normalize_llm_category(parsed_result.clasificacion_ia)
+    normalized_priority = _normalize_llm_priority(parsed_result.prioridad)
+    requires_more_info = bool(parsed_result.requiere_mas_info)
+    confidence = round(min(max(parsed_result.confianza_clasificacion, 0.0), 1.0), 2)
+
+    preguntas_sugeridas = _normalize_llm_questions(
+        parsed_result.preguntas_sugeridas,
+        requires_more_info=requires_more_info,
+    )
+    if requires_more_info and not preguntas_sugeridas:
+        preguntas_sugeridas = _suggest_questions(normalized_category, True)
+
+    return AnalisisIncidenteLLMResult(
+        clasificacion_ia=normalized_category,
+        confianza_clasificacion=confidence,
+        prioridad=normalized_priority,
+        resumen_ia=parsed_result.resumen_ia.strip(),
+        requiere_mas_info=requires_more_info,
+        preguntas_sugeridas=preguntas_sugeridas,
+    )
+
+
 def _suggest_questions(category: str, requires_more_info: bool) -> list[str]:
     if not requires_more_info:
         return []
@@ -352,6 +854,35 @@ def _normalize_evidence_type(tipo_evidencia: str) -> str:
             "tipo_evidencia no permitido. Use TEXTO, AUDIO_TRANSCRITO o IMAGEN_ANALIZADA."
         )
     return normalized_type
+
+
+def _resolve_image_evidence_for_analysis(
+    db: Session,
+    *,
+    id_incidente: int,
+    payload: AnalizarImagenIncidenteRequest,
+):
+    if payload.id_evidencia is not None:
+        evidencia = get_evidencia_by_id_and_incidente_id(
+            db,
+            id_incidente=id_incidente,
+            id_evidencia=payload.id_evidencia,
+        )
+        if not evidencia or not _is_image_evidence(evidencia):
+            raise ImageEvidenceNotFoundError(
+                "La evidencia especificada no existe o no corresponde a una imagen valida del incidente."
+            )
+        return evidencia, _serialize_archivo_url(evidencia.archivo_url)
+
+    if payload.archivo_url and payload.archivo_url.strip():
+        return None, payload.archivo_url.strip()
+
+    evidencia = get_latest_image_evidence_by_incidente_id(db, id_incidente)
+    if not evidencia:
+        raise ImageEvidenceNotFoundError(
+            "El incidente no cuenta con una evidencia de imagen disponible para analizar con Roboflow."
+        )
+    return evidencia, _serialize_archivo_url(evidencia.archivo_url)
 
 
 def _normalize_service_name(value: str | None) -> str:
@@ -503,7 +1034,7 @@ def _build_taller_candidate_response(
     )
 
 
-def _run_incident_analysis(
+def _run_rule_based_incident_analysis(
     *,
     id_incidente: int | None,
     descripcion_texto: str | None,
@@ -544,6 +1075,65 @@ def _run_incident_analysis(
     )
 
 
+def _run_incident_analysis(
+    *,
+    id_incidente: int | None,
+    descripcion_texto: str | None,
+    texto_evidencias: list[str],
+    latitud: Decimal | None,
+    longitud: Decimal | None,
+) -> AnalisisIncidenteResponse:
+    provider = settings.AI_PROVIDER.strip().lower()
+
+    try:
+        if provider == "openrouter" and settings.OPENROUTER_API_KEY:
+            llm_result = _run_openrouter_incident_analysis(
+                descripcion_texto=descripcion_texto,
+                texto_evidencias=texto_evidencias,
+                latitud=latitud,
+                longitud=longitud,
+            )
+        elif provider == "gemini" and settings.GEMINI_API_KEY:
+            llm_result = _run_gemini_incident_analysis(
+                descripcion_texto=descripcion_texto,
+                texto_evidencias=texto_evidencias,
+                latitud=latitud,
+                longitud=longitud,
+            )
+        elif provider == "openai" and settings.OPENAI_API_KEY:
+            llm_result = _run_openai_incident_analysis(
+                descripcion_texto=descripcion_texto,
+                texto_evidencias=texto_evidencias,
+                latitud=latitud,
+                longitud=longitud,
+            )
+        else:
+            llm_result = None
+    except Exception:
+        if not settings.AI_USE_FALLBACK:
+            raise
+        llm_result = None
+
+    if llm_result is not None:
+        return AnalisisIncidenteResponse(
+            id_incidente=id_incidente,
+            clasificacion_ia=llm_result.clasificacion_ia,
+            confianza_clasificacion=llm_result.confianza_clasificacion,
+            prioridad=llm_result.prioridad,
+            resumen_ia=llm_result.resumen_ia,
+            requiere_mas_info=llm_result.requiere_mas_info,
+            preguntas_sugeridas=llm_result.preguntas_sugeridas,
+        )
+
+    return _run_rule_based_incident_analysis(
+        id_incidente=id_incidente,
+        descripcion_texto=descripcion_texto,
+        texto_evidencias=texto_evidencias,
+        latitud=latitud,
+        longitud=longitud,
+    )
+
+
 def analizar_incidente_manual_service(
     payload: AnalisisIncidenteManualRequest,
 ) -> AnalisisIncidenteResponse:
@@ -578,6 +1168,7 @@ def analizar_incidente_por_id_service(
             latitud=incidente.latitud,
             longitud=incidente.longitud,
         )
+        prioridad = get_prioridad_by_nombre(db, analysis.prioridad)
         update_incidente_analysis_result(
             db,
             incidente,
@@ -585,6 +1176,7 @@ def analizar_incidente_por_id_service(
             confianza_clasificacion=analysis.confianza_clasificacion,
             resumen_ia=analysis.resumen_ia,
             requiere_mas_info=analysis.requiere_mas_info,
+            id_prioridad=prioridad.id_prioridad if prioridad else None,
         )
         db.commit()
         return analysis
@@ -665,6 +1257,76 @@ def solicitar_mas_informacion_incidente_service(
             mensaje=mensaje_base,
             preguntas_sugeridas=preguntas_sugeridas,
             id_notificacion=notification.id_notificacion,
+        )
+    except Exception:
+        db.rollback()
+        raise
+
+
+def analizar_imagen_incidente_roboflow_service(
+    db: Session,
+    id_incidente: int,
+    payload: AnalizarImagenIncidenteRequest,
+) -> AnalisisImagenRoboflowResponse:
+    incidente = get_incidente_by_id(db, id_incidente)
+    if not incidente:
+        raise IncidentNotFoundError("Incidente no encontrado.")
+
+    evidencia_origen, archivo_url = _resolve_image_evidence_for_analysis(
+        db,
+        id_incidente=id_incidente,
+        payload=payload,
+    )
+    if not archivo_url:
+        raise ImageEvidenceNotFoundError(
+            "No se encontro una URL valida de imagen para analizar."
+        )
+
+    try:
+        (
+            task_type,
+            top_label,
+            confidence,
+            categoria_sugerida,
+            visual_parts,
+        ) = _run_roboflow_image_analysis(image_url=archivo_url)
+        resumen_visual = visual_parts[0]
+        detecciones = visual_parts[1:]
+        descripcion = payload.descripcion.strip() if payload.descripcion else None
+        if descripcion:
+            texto_extraido = f"{resumen_visual} Contexto adicional: {descripcion}."
+        else:
+            texto_extraido = resumen_visual
+
+        evidencia_procesada = create_processed_evidence(
+            db,
+            id_incidente=incidente.id_incidente,
+            tipo_evidencia="IMAGEN_ANALIZADA",
+            archivo_url=archivo_url,
+            texto_extraido=texto_extraido,
+            descripcion=(
+                descripcion
+                or f"Analisis visual generado por Roboflow desde evidencia de imagen del incidente."
+            ),
+        )
+        db.commit()
+        return AnalisisImagenRoboflowResponse(
+            id_incidente=incidente.id_incidente,
+            id_evidencia_origen=evidencia_origen.id_evidencia if evidencia_origen else None,
+            id_evidencia_procesada=evidencia_procesada.id_evidencia,
+            archivo_url=archivo_url,
+            proveedor="roboflow",
+            tipo_modelo=task_type,
+            modelo=settings.ROBOFLOW_MODEL_ID or "",
+            clase_principal=top_label,
+            confianza=confidence,
+            categoria_sugerida=categoria_sugerida,
+            resumen_visual=resumen_visual,
+            detecciones=detecciones,
+            mensaje=(
+                "Analisis visual generado correctamente. "
+                "Se recomienda volver a ejecutar CU25 para reanalizar el incidente con esta nueva evidencia."
+            ),
         )
     except Exception:
         db.rollback()

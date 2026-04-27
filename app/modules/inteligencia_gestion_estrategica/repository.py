@@ -9,6 +9,7 @@ from app.modules.gestion_incidentes_atencion.models import (
     AsignacionServicio,
     Evidencia,
     Incidente,
+    Prioridad,
     SolicitudTaller,
 )
 from app.modules.gestion_operativa_taller_tecnico.models import (
@@ -40,6 +41,35 @@ def get_evidencia_textos_by_incidente_id(db: Session, id_incidente: int) -> list
     ]
 
 
+def get_evidencia_by_id_and_incidente_id(
+    db: Session,
+    *,
+    id_incidente: int,
+    id_evidencia: int,
+) -> Evidencia | None:
+    return db.execute(
+        select(Evidencia).where(
+            Evidencia.id_incidente == id_incidente,
+            Evidencia.id_evidencia == id_evidencia,
+        )
+    ).scalar_one_or_none()
+
+
+def get_latest_image_evidence_by_incidente_id(
+    db: Session,
+    id_incidente: int,
+) -> Evidencia | None:
+    return db.execute(
+        select(Evidencia)
+        .where(
+            Evidencia.id_incidente == id_incidente,
+            Evidencia.archivo_url.is_not(None),
+            Evidencia.tipo_evidencia.in_(("IMAGEN", "FOTO", "IMAGE")),
+        )
+        .order_by(Evidencia.fecha_registro.desc(), Evidencia.id_evidencia.desc())
+    ).scalar_one_or_none()
+
+
 def update_incidente_analysis_result(
     db: Session,
     incidente: Incidente,
@@ -48,14 +78,23 @@ def update_incidente_analysis_result(
     confianza_clasificacion: float,
     resumen_ia: str,
     requiere_mas_info: bool,
+    id_prioridad: int | None = None,
 ) -> Incidente:
     incidente.clasificacion_ia = clasificacion_ia
     incidente.confianza_clasificacion = round(confianza_clasificacion, 2)
     incidente.resumen_ia = resumen_ia
     incidente.requiere_mas_info = requiere_mas_info
+    if id_prioridad is not None:
+        incidente.id_prioridad = id_prioridad
     db.flush()
     db.refresh(incidente)
     return incidente
+
+
+def get_prioridad_by_nombre(db: Session, nombre: str) -> Prioridad | None:
+    return db.execute(
+        select(Prioridad).where(Prioridad.nombre == nombre.upper())
+    ).scalar_one_or_none()
 
 
 def get_cliente_by_id(db: Session, id_cliente: int) -> Cliente | None:

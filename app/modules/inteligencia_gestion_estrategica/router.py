@@ -1,8 +1,11 @@
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.core.db.session import get_db
 from app.modules.inteligencia_gestion_estrategica.schemas import (
+    AnalisisImagenRoboflowResponse,
+    AnalizarImagenIncidenteRequest,
     AnalisisIncidenteManualRequest,
     AnalisisIncidenteResponse,
     AsignacionInteligenteResponse,
@@ -19,7 +22,10 @@ from app.modules.inteligencia_gestion_estrategica.service import (
     IncidentNotAnalyzedError,
     IncidentUserNotFoundError,
     IncidentVehicleNotFoundError,
+    ImageEvidenceNotFoundError,
     NoCandidateTallerFoundError,
+    RoboflowConfigurationError,
+    analizar_imagen_incidente_roboflow_service,
     asignar_taller_inteligentemente_service,
     analizar_incidente_manual_service,
     analizar_incidente_por_id_service,
@@ -165,6 +171,48 @@ def listar_evidencias_procesadas_incidente(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Ocurrio un error inesperado al listar las evidencias del incidente.",
+        ) from exc
+
+
+@router.post(
+    "/incidentes/{id_incidente}/analizar-imagen",
+    response_model=AnalisisImagenRoboflowResponse,
+    status_code=status.HTTP_200_OK,
+)
+def analizar_imagen_incidente_roboflow(
+    id_incidente: int,
+    payload: AnalizarImagenIncidenteRequest,
+    db: Session = Depends(get_db),
+):
+    try:
+        return analizar_imagen_incidente_roboflow_service(db, id_incidente, payload)
+    except (IncidentNotFoundError, ImageEvidenceNotFoundError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except (RoboflowConfigurationError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=(
+                "Roboflow respondio con error durante el analisis de imagen: "
+                f"{exc.response.status_code}."
+            ),
+        ) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="No fue posible comunicarse con Roboflow para analizar la imagen.",
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Ocurrio un error inesperado al analizar la imagen con Roboflow.",
         ) from exc
 
 

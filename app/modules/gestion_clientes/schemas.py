@@ -1,6 +1,14 @@
 from pydantic import BaseModel, ConfigDict, Field
 
 
+class TipoVehiculoResponse(BaseModel):
+    id_tipo_vehiculo: int
+    nombre: str
+    descripcion: str | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class VehiculoCreateRequest(BaseModel):
     id_tipo_vehiculo: int
     placa: str = Field(min_length=5, max_length=20)

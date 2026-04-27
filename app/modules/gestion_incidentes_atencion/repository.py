@@ -22,6 +22,16 @@ def get_tipo_incidente_by_id(db: Session, id_tipo_incidente: int) -> TipoInciden
     ).scalar_one_or_none()
 
 
+def list_tipos_incidente(db: Session) -> list[TipoIncidente]:
+    return list(
+        db.execute(
+            select(TipoIncidente)
+            .where(TipoIncidente.estado == True)
+            .order_by(TipoIncidente.nombre.asc())
+        ).scalars()
+    )
+
+
 def get_prioridad_by_nombre(db: Session, nombre: str) -> Prioridad | None:
     return db.execute(
         select(Prioridad).where(Prioridad.nombre == nombre)

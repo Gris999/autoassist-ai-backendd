@@ -25,6 +25,14 @@ class AnalisisIncidenteResponse(PreguntasSugeridasResponse):
     requiere_mas_info: bool
 
 
+class AnalisisIncidenteLLMResult(PreguntasSugeridasResponse):
+    clasificacion_ia: str
+    confianza_clasificacion: float = Field(ge=0.0, le=1.0)
+    prioridad: str
+    resumen_ia: str = Field(min_length=1, max_length=2000)
+    requiere_mas_info: bool
+
+
 class SolicitudMasInformacionResponse(PreguntasSugeridasResponse):
     id_incidente: int
     id_usuario_destino: int
@@ -50,6 +58,30 @@ class EvidenciaProcesadaResponse(BaseModel):
     texto_extraido: str | None = None
     descripcion: str | None = None
     mensaje: str | None = None
+
+
+class AnalizarImagenIncidenteRequest(BaseModel):
+    id_evidencia: int | None = None
+    archivo_url: str | None = None
+    descripcion: str | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class AnalisisImagenRoboflowResponse(BaseModel):
+    id_incidente: int
+    id_evidencia_origen: int | None = None
+    id_evidencia_procesada: int
+    archivo_url: str
+    proveedor: str
+    tipo_modelo: str
+    modelo: str
+    clase_principal: str
+    confianza: float = Field(ge=0.0, le=1.0)
+    categoria_sugerida: str
+    resumen_visual: str
+    detecciones: list[str] = Field(default_factory=list)
+    mensaje: str
 
 
 class TallerCandidatoResponse(BaseModel):

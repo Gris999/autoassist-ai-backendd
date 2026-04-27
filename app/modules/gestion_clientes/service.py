@@ -11,14 +11,21 @@ from app.modules.gestion_clientes.repository import (
     get_tipo_vehiculo_by_id,
     get_vehiculo_by_placa,
     get_vehiculos_by_cliente_id,
+    list_tipos_vehiculo,
 )
 from app.modules.gestion_clientes.schemas import (
     CalificacionServicioCreateRequest,
     CalificacionServicioResponse,
     ServicioPendienteCalificacionResponse,
+    TipoVehiculoResponse,
     VehiculoCreateRequest,
     VehiculoResponse,
 )
+
+
+def listar_tipos_vehiculo_service(db: Session) -> list[TipoVehiculoResponse]:
+    tipos = list_tipos_vehiculo(db)
+    return [TipoVehiculoResponse.model_validate(tipo) for tipo in tipos]
 
 
 def register_vehiculo_service(

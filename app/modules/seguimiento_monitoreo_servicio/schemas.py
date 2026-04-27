@@ -1,7 +1,7 @@
 from datetime import datetime
 from decimal import Decimal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, model_validator
 
 
 class EstadoServicioDetalleResponse(BaseModel):
@@ -27,6 +27,30 @@ class EstadoServicioDetalleResponse(BaseModel):
     confianza_clasificacion: Decimal | None = None
     resumen_ia: str | None = None
     requiere_mas_info: bool
+
+
+class ActualizarUbicacionActualRequest(BaseModel):
+    latitud: Decimal = Field(ge=-90, le=90)
+    longitud: Decimal = Field(ge=-180, le=180)
+    confirmar_envio: bool = True
+
+    @model_validator(mode="after")
+    def validar_confirmacion(self):
+        if not self.confirmar_envio:
+            raise ValueError("Debe confirmar el envio de la ubicacion actual.")
+        return self
+
+
+class UbicacionActualTecnicoResponse(BaseModel):
+    id_incidente: int
+    id_tecnico: int
+    id_unidad_movil: int | None = None
+    latitud_actual: Decimal
+    longitud_actual: Decimal
+    fecha_actualizacion: datetime
+    estado_asignacion: str
+    estado_servicio_actual: str
+    mensaje: str
 
 
 class ClienteIncidenteListResponse(BaseModel):
@@ -154,3 +178,96 @@ class IncidenteHistorialDetailResponse(BaseModel):
     longitud: Decimal | None = None
     historial: list[HistorialIncidenteEventoResponse]
     mensaje: str | None = None
+
+
+class MetodoPagoDisponibleResponse(BaseModel):
+    codigo: str
+    nombre: str
+    descripcion: str
+
+
+class DetalleCobroAuxilioResponse(BaseModel):
+    descripcion: str
+    cantidad: int
+    precio_unitario: Decimal
+    subtotal: Decimal
+    id_taller_auxilio: int
+    tipo_auxilio: str
+
+
+class PagoIncidenteDetalleResponse(BaseModel):
+    id_incidente: int
+    titulo: str
+    estado_servicio_actual: str
+    id_estado_servicio_actual: int
+    tipo_incidente: str
+    nombre_taller: str
+    id_taller: int
+    moneda: str
+    monto_total: Decimal
+    habilitado_para_pago: bool
+    mensaje: str | None = None
+    metodos_pago_disponibles: list[MetodoPagoDisponibleResponse]
+    detalles_cobro: list[DetalleCobroAuxilioResponse]
+    pago_existente: bool
+    estado_pago: str | None = None
+    referencia_transaccion: str | None = None
+
+
+class CrearIntencionPagoRequest(BaseModel):
+    metodo_pago: str = Field(min_length=2, max_length=50)
+
+
+class ConfirmarPagoDemoRequest(BaseModel):
+    metodo_pago: str = Field(default="DEMO_CARD", min_length=2, max_length=50)
+    referencia_demo: str | None = Field(default=None, max_length=150)
+
+
+class IntencionPagoResponse(BaseModel):
+    id_pago_servicio: int
+    id_incidente: int
+    monto_total: Decimal
+    moneda: str
+    estado_pago: str
+    client_secret: str
+    payment_intent_id: str
+    publishable_key: str | None = None
+    metodo_pago: str
+    mensaje: str
+
+
+class ComisionPlataformaResponse(BaseModel):
+    porcentaje: Decimal
+    monto_comision: Decimal
+    estado: str
+    fecha_calculo: datetime
+
+
+class ComprobantePagoResponse(BaseModel):
+    id_pago_servicio: int
+    id_incidente: int
+    titulo_incidente: str
+    nombre_taller: str
+    metodo_pago: str
+    estado_pago: str
+    monto_total: Decimal
+    moneda: str
+    fecha_pago: datetime | None = None
+    referencia_transaccion: str | None = None
+    receipt_url: str | None = None
+    detalles: list[DetalleCobroAuxilioResponse]
+    comision_plataforma: ComisionPlataformaResponse | None = None
+
+
+class ConfirmacionPagoDemoResponse(BaseModel):
+    id_pago_servicio: int
+    id_incidente: int
+    estado_pago: str
+    referencia_transaccion: str
+    mensaje: str
+
+
+class WebhookStripeResponse(BaseModel):
+    recibido: bool
+    evento: str
+    mensaje: str

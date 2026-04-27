@@ -8,17 +8,36 @@ from app.modules.gestion_clientes.schemas import (
     CalificacionServicioCreateRequest,
     CalificacionServicioResponse,
     ServicioPendienteCalificacionResponse,
+    TipoVehiculoResponse,
     VehiculoCreateRequest,
     VehiculoResponse,
 )
 from app.modules.gestion_clientes.service import (
     get_mis_vehiculos_service,
+    listar_tipos_vehiculo_service,
     listar_servicios_pendientes_calificacion_service,
     register_vehiculo_service,
     registrar_calificacion_service,
 )
 
-router = APIRouter(prefix="/clientes", tags=["Gestión Clientes"])
+router = APIRouter(prefix="/clientes", tags=["Gestion Clientes"])
+
+
+@router.get(
+    "/tipos-vehiculo",
+    response_model=list[TipoVehiculoResponse],
+    status_code=status.HTTP_200_OK,
+)
+def listar_tipos_vehiculo(
+    db: Session = Depends(get_db),
+):
+    try:
+        return listar_tipos_vehiculo_service(db)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
 
 
 @router.post(

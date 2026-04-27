@@ -45,3 +45,34 @@ def get_current_user(
         )
 
     return usuario
+
+
+def get_current_user_from_token(token: str, db: Session) -> Usuario:
+    try:
+        payload = decode_access_token(token)
+        user_id = payload.get("sub")
+        if not user_id:
+            raise ValueError("Token sin subject.")
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=str(e),
+        )
+
+    usuario = db.execute(
+        select(Usuario).where(Usuario.id_usuario == int(user_id))
+    ).scalar_one_or_none()
+
+    if not usuario:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Usuario no encontrado.",
+        )
+
+    if not usuario.estado:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Usuario inactivo.",
+        )
+
+    return usuario

@@ -310,11 +310,17 @@ def update_tecnico(
     *,
     telefono_contacto: str | None = None,
     disponible: bool | None = None,
+    latitud_actual: float | None = None,
+    longitud_actual: float | None = None,
 ) -> Tecnico:
     if telefono_contacto is not None:
         tecnico.telefono_contacto = telefono_contacto
     if disponible is not None:
         tecnico.disponible = disponible
+    if latitud_actual is not None:
+        tecnico.latitud_actual = latitud_actual
+    if longitud_actual is not None:
+        tecnico.longitud_actual = longitud_actual
     db.flush()
     db.refresh(tecnico)
     return tecnico

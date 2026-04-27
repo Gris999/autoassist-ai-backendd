@@ -15,6 +15,15 @@ class IncidenteCreateRequest(BaseModel):
     longitud: Decimal | None = None
 
 
+class TipoIncidenteResponse(BaseModel):
+    id_tipo_incidente: int
+    nombre: str
+    descripcion: str | None = None
+    estado: bool
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class IncidenteResponse(BaseModel):
     id_incidente: int
     id_cliente: int
