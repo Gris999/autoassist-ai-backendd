@@ -17,6 +17,7 @@ from app.modules.gestion_operativa_taller_tecnico.models import (
 from app.modules.seguimiento_monitoreo_servicio.models import (
     ComisionPlataforma,
     DetallePago,
+    DispositivoPushUsuario,
     Notificacion,
     PagoServicio,
 )
@@ -109,6 +110,38 @@ def get_notificaciones_by_usuario_id(db: Session, id_usuario: int) -> list[Notif
     )
 
 
+def get_dispositivos_push_by_usuario_id(
+    db: Session,
+    id_usuario: int,
+    *,
+    solo_activos: bool = False,
+) -> list[DispositivoPushUsuario]:
+    query = select(DispositivoPushUsuario).where(
+        DispositivoPushUsuario.id_usuario == id_usuario,
+    )
+    if solo_activos:
+        query = query.where(DispositivoPushUsuario.activo == True)
+    return list(
+        db.execute(
+            query.order_by(
+                DispositivoPushUsuario.activo.desc(),
+                DispositivoPushUsuario.fecha_actualizacion.desc(),
+            )
+        ).scalars()
+    )
+
+
+def get_dispositivo_push_by_token(
+    db: Session,
+    token_push: str,
+) -> DispositivoPushUsuario | None:
+    return db.execute(
+        select(DispositivoPushUsuario).where(
+            DispositivoPushUsuario.token_push == token_push,
+        )
+    ).scalar_one_or_none()
+
+
 def get_notificacion_by_id_and_usuario(
     db: Session,
     *,
@@ -196,8 +229,71 @@ def create_notificacion(
         mensaje=mensaje,
         tipo_notificacion=tipo_notificacion,
         leido=False,
+        push_estado="PENDIENTE",
     )
     db.add(notificacion)
+    db.flush()
+    db.refresh(notificacion)
+    return notificacion
+
+
+def upsert_dispositivo_push(
+    db: Session,
+    *,
+    id_usuario: int,
+    token_push: str,
+    plataforma: str,
+    proveedor: str,
+) -> DispositivoPushUsuario:
+    from datetime import datetime
+
+    dispositivo = get_dispositivo_push_by_token(db, token_push)
+    if dispositivo is None:
+        dispositivo = DispositivoPushUsuario(
+            id_usuario=id_usuario,
+            token_push=token_push,
+            plataforma=plataforma,
+            proveedor=proveedor,
+            activo=True,
+        )
+        db.add(dispositivo)
+    else:
+        dispositivo.id_usuario = id_usuario
+        dispositivo.plataforma = plataforma
+        dispositivo.proveedor = proveedor
+        dispositivo.activo = True
+        dispositivo.fecha_actualizacion = datetime.utcnow()
+    db.flush()
+    db.refresh(dispositivo)
+    return dispositivo
+
+
+def update_dispositivo_push_activo(
+    db: Session,
+    dispositivo: DispositivoPushUsuario,
+    *,
+    activo: bool,
+) -> DispositivoPushUsuario:
+    from datetime import datetime
+
+    dispositivo.activo = activo
+    dispositivo.fecha_actualizacion = datetime.utcnow()
+    db.flush()
+    db.refresh(dispositivo)
+    return dispositivo
+
+
+def update_notificacion_push_result(
+    db: Session,
+    notificacion: Notificacion,
+    *,
+    push_estado: str,
+    push_error: str | None = None,
+    fecha_envio_push=None,
+) -> Notificacion:
+    notificacion.push_estado = push_estado
+    notificacion.push_error = push_error
+    notificacion.fecha_envio_push = fecha_envio_push
     db.flush()
     db.refresh(notificacion)
     return notificacion

@@ -1,8 +1,10 @@
 import asyncio
+import json
 from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime
 
 import anyio
+import httpx
 from sqlalchemy.orm import Session
 from app.core.config.settings import settings
 
@@ -26,6 +28,8 @@ from app.modules.seguimiento_monitoreo_servicio.schemas import (
     ComprobantePagoResponse,
     CrearIntencionPagoRequest,
     DetalleCobroAuxilioResponse,
+    DispositivoPushRegisterRequest,
+    DispositivoPushResponse,
     EstadoServicioDetalleResponse,
     HistorialIncidenteEventoResponse,
     IncidenteHistorialDetailResponse,
@@ -56,6 +60,8 @@ from app.modules.seguimiento_monitoreo_servicio.repository import (
     get_incidentes_historial_by_taller_id,
     get_incidentes_historial_by_tecnico_id,
     get_incidente_by_id,
+    get_dispositivos_push_by_usuario_id,
+    get_dispositivo_push_by_token,
     get_notificacion_by_id_and_usuario,
     get_notificaciones_by_usuario_id,
     get_pago_servicio_by_id,
@@ -65,6 +71,9 @@ from app.modules.seguimiento_monitoreo_servicio.repository import (
     get_usuario_by_id,
     update_pago_servicio,
     update_notificacion_leido,
+    update_dispositivo_push_activo,
+    update_notificacion_push_result,
+    upsert_dispositivo_push,
     upsert_comision_plataforma,
 )
 from app.modules.gestion_incidentes_atencion.repository import get_incidente_by_id_and_cliente
@@ -106,6 +115,11 @@ PAYMENT_STATE_PAID = "PAGADO"
 PAYMENT_STATE_REJECTED = "RECHAZADO"
 PAYMENT_STATE_CANCELED = "CANCELADO"
 PAYABLE_SERVICE_STATES = {"FINALIZADO"}
+PUSH_STATE_PENDING = "PENDIENTE"
+PUSH_STATE_SENT = "ENVIADA"
+PUSH_STATE_FAILED = "FALLIDA"
+PUSH_STATE_NO_TOKEN = "SIN_TOKEN"
+PUSH_STATE_DISABLED = "DESHABILITADA"
 INCIDENT_TYPE_TO_AUXILIO = {
     "BATERIA_DESCARGADA": "AUXILIO_ELECTRICO",
     "PINCHAZO_LLANTA": "CAMBIO_DE_LLANTA",
@@ -373,6 +387,9 @@ def _to_notificacion_list_response(notificacion: Notificacion) -> NotificacionLi
         mensaje=notificacion.mensaje,
         tipo_notificacion=notificacion.tipo_notificacion,
         leido=notificacion.leido,
+        push_estado=notificacion.push_estado,
+        push_error=notificacion.push_error,
+        fecha_envio_push=notificacion.fecha_envio_push,
         fecha_envio=notificacion.fecha_envio,
     )
 
@@ -386,8 +403,265 @@ def _to_notificacion_detail_response(notificacion: Notificacion) -> Notificacion
         mensaje=notificacion.mensaje,
         tipo_notificacion=notificacion.tipo_notificacion,
         leido=notificacion.leido,
+        push_estado=notificacion.push_estado,
+        push_error=notificacion.push_error,
+        fecha_envio_push=notificacion.fecha_envio_push,
         fecha_envio=notificacion.fecha_envio,
     )
+
+
+def _to_dispositivo_push_response(dispositivo) -> DispositivoPushResponse:
+    return DispositivoPushResponse(
+        id_dispositivo_push=dispositivo.id_dispositivo_push,
+        token_push=dispositivo.token_push,
+        plataforma=dispositivo.plataforma,
+        proveedor=dispositivo.proveedor,
+        activo=dispositivo.activo,
+        fecha_registro=dispositivo.fecha_registro,
+        fecha_actualizacion=dispositivo.fecha_actualizacion,
+    )
+
+
+def _normalize_push_provider(value: str) -> str:
+    normalized = value.strip().upper()
+    if normalized not in {"EXPO", "FCM"}:
+        raise ValueError("Proveedor push no soportado. Use FCM o EXPO.")
+    return normalized
+
+
+def _normalize_push_platform(value: str) -> str:
+    normalized = value.strip().upper()
+    if normalized not in {"ANDROID", "IOS", "WEB"}:
+        raise ValueError("Plataforma no soportada. Use ANDROID, IOS o WEB.")
+    return normalized
+
+
+def _build_push_payload(notificacion: Notificacion, token: str) -> dict:
+    data = {
+        "id_notificacion": notificacion.id_notificacion,
+        "id_incidente": notificacion.id_incidente,
+        "tipo_notificacion": notificacion.tipo_notificacion,
+    }
+    return {
+        "to": token,
+        "title": notificacion.titulo,
+        "body": notificacion.mensaje,
+        "data": data,
+        "sound": "default",
+    }
+
+
+def _send_expo_push_notifications(notificacion: Notificacion, tokens: list[str]) -> tuple[bool, str | None]:
+    payload = [_build_push_payload(notificacion, token) for token in tokens]
+    response = httpx.post(
+        settings.EXPO_PUSH_URL,
+        json=payload,
+        timeout=settings.PUSH_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+    response_payload = response.json()
+    tickets = response_payload.get("data", [])
+    errors = []
+    if isinstance(tickets, list):
+        for ticket in tickets:
+            if ticket.get("status") == "error":
+                details = ticket.get("details") or {}
+                error_code = details.get("error") or ticket.get("message") or "error"
+                errors.append(str(error_code))
+    if errors:
+        return False, "; ".join(errors[:5])
+    return True, None
+
+
+def _get_firebase_credentials():
+    try:
+        from google.oauth2 import service_account
+        from google.auth.transport.requests import Request
+    except ImportError as exc:
+        raise ValueError(
+            "Las dependencias de Firebase no estan instaladas. "
+            "Instale google-auth y requests desde requirements.txt."
+        ) from exc
+
+    scopes = ["https://www.googleapis.com/auth/firebase.messaging"]
+    if settings.FIREBASE_SERVICE_ACCOUNT_JSON:
+        service_account_info = json.loads(settings.FIREBASE_SERVICE_ACCOUNT_JSON)
+        credentials = service_account.Credentials.from_service_account_info(
+            service_account_info,
+            scopes=scopes,
+        )
+    elif settings.FIREBASE_SERVICE_ACCOUNT_FILE:
+        credentials = service_account.Credentials.from_service_account_file(
+            settings.FIREBASE_SERVICE_ACCOUNT_FILE,
+            scopes=scopes,
+        )
+    else:
+        raise ValueError(
+            "Configure FIREBASE_SERVICE_ACCOUNT_FILE o FIREBASE_SERVICE_ACCOUNT_JSON."
+        )
+
+    credentials.refresh(Request())
+    return credentials
+
+
+def _resolve_firebase_project_id(credentials) -> str:
+    project_id = settings.FIREBASE_PROJECT_ID or getattr(credentials, "project_id", None)
+    if not project_id:
+        raise ValueError("Configure FIREBASE_PROJECT_ID o use un service account con project_id.")
+    return project_id
+
+
+def _build_fcm_payload(notificacion: Notificacion, token: str) -> dict:
+    data = {
+        "id_notificacion": str(notificacion.id_notificacion),
+        "id_incidente": str(notificacion.id_incidente or ""),
+        "tipo_notificacion": notificacion.tipo_notificacion,
+    }
+    return {
+        "message": {
+            "token": token,
+            "notification": {
+                "title": notificacion.titulo,
+                "body": notificacion.mensaje,
+            },
+            "data": data,
+        }
+    }
+
+
+def _send_fcm_push_notifications(notificacion: Notificacion, tokens: list[str]) -> tuple[bool, str | None]:
+    credentials = _get_firebase_credentials()
+    project_id = _resolve_firebase_project_id(credentials)
+    url = f"https://fcm.googleapis.com/v1/projects/{project_id}/messages:send"
+    headers = {
+        "Authorization": f"Bearer {credentials.token}",
+        "Content-Type": "application/json",
+    }
+
+    errors = []
+    for token in tokens:
+        response = httpx.post(
+            url,
+            headers=headers,
+            json=_build_fcm_payload(notificacion, token),
+            timeout=settings.PUSH_TIMEOUT_SECONDS,
+        )
+        if response.is_success:
+            continue
+
+        try:
+            error_payload = response.json()
+        except ValueError:
+            error_payload = {"error": {"message": response.text}}
+        message = (
+            error_payload.get("error", {}).get("message")
+            or f"FCM HTTP {response.status_code}"
+        )
+        status_name = error_payload.get("error", {}).get("status")
+        errors.append(str(status_name or message))
+
+    if errors:
+        return False, "; ".join(errors[:5])
+    return True, None
+
+
+def dispatch_push_notification_service(
+    db: Session,
+    notificacion: Notificacion,
+) -> Notificacion:
+    provider = settings.PUSH_PROVIDER.strip().lower()
+    if provider in {"", "disabled", "none"}:
+        return update_notificacion_push_result(
+            db,
+            notificacion,
+            push_estado=PUSH_STATE_DISABLED,
+            push_error="El proveedor push no esta habilitado.",
+        )
+
+    dispositivos = [
+        dispositivo
+        for dispositivo in get_dispositivos_push_by_usuario_id(
+            db,
+            notificacion.id_usuario,
+            solo_activos=True,
+        )
+        if dispositivo.proveedor.strip().lower() == provider
+    ]
+    if not dispositivos:
+        return update_notificacion_push_result(
+            db,
+            notificacion,
+            push_estado=PUSH_STATE_NO_TOKEN,
+            push_error=f"El usuario no tiene token push activo para {provider.upper()}.",
+        )
+
+    tokens = [dispositivo.token_push for dispositivo in dispositivos]
+    try:
+        if provider == "expo":
+            sent, error = _send_expo_push_notifications(notificacion, tokens)
+        elif provider == "fcm":
+            sent, error = _send_fcm_push_notifications(notificacion, tokens)
+        else:
+            sent = False
+            error = "Proveedor push no soportado por el backend."
+
+        if error and any(code in error for code in ("DeviceNotRegistered", "UNREGISTERED")):
+            for dispositivo in dispositivos:
+                update_dispositivo_push_activo(db, dispositivo, activo=False)
+
+        return update_notificacion_push_result(
+            db,
+            notificacion,
+            push_estado=PUSH_STATE_SENT if sent else PUSH_STATE_FAILED,
+            push_error=error,
+            fecha_envio_push=datetime.utcnow() if sent else None,
+        )
+    except Exception as exc:
+        return update_notificacion_push_result(
+            db,
+            notificacion,
+            push_estado=PUSH_STATE_FAILED,
+            push_error=str(exc)[:1000],
+        )
+
+
+def registrar_dispositivo_push_service(
+    db: Session,
+    current_user,
+    payload: DispositivoPushRegisterRequest,
+) -> DispositivoPushResponse:
+    dispositivo = upsert_dispositivo_push(
+        db,
+        id_usuario=current_user.id_usuario,
+        token_push=payload.token_push.strip(),
+        plataforma=_normalize_push_platform(payload.plataforma),
+        proveedor=_normalize_push_provider(payload.proveedor),
+    )
+    db.commit()
+    db.refresh(dispositivo)
+    return _to_dispositivo_push_response(dispositivo)
+
+
+def listar_dispositivos_push_service(
+    db: Session,
+    current_user,
+) -> list[DispositivoPushResponse]:
+    dispositivos = get_dispositivos_push_by_usuario_id(db, current_user.id_usuario)
+    return [_to_dispositivo_push_response(dispositivo) for dispositivo in dispositivos]
+
+
+def desactivar_dispositivo_push_service(
+    db: Session,
+    current_user,
+    token_push: str,
+) -> DispositivoPushResponse:
+    dispositivo = get_dispositivo_push_by_token(db, token_push)
+    if not dispositivo or dispositivo.id_usuario != current_user.id_usuario:
+        raise ValueError("El token push no existe o no pertenece al usuario autenticado.")
+    dispositivo = update_dispositivo_push_activo(db, dispositivo, activo=False)
+    db.commit()
+    db.refresh(dispositivo)
+    return _to_dispositivo_push_response(dispositivo)
 
 
 def crear_notificacion_service(
@@ -411,6 +685,7 @@ def crear_notificacion_service(
         mensaje=payload.mensaje,
         tipo_notificacion=payload.tipo_notificacion,
     )
+    dispatch_push_notification_service(db, notificacion)
     return _to_notificacion_detail_response(notificacion)
 
 
@@ -451,6 +726,8 @@ def marcar_notificacion_leida_service(
         raise ValueError("La notificacion no existe o no pertenece al usuario autenticado.")
 
     update_notificacion_leido(db, notificacion, leido=True)
+    db.commit()
+    db.refresh(notificacion)
     return NotificacionLeidaResponse(
         id_notificacion=notificacion.id_notificacion,
         leido=notificacion.leido,
