@@ -1,3 +1,4 @@
+from datetime import datetime
 from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -111,4 +112,27 @@ class AsignacionInteligenteResponse(BaseModel):
     candidatos: list[TallerCandidatoResponse]
     total_candidatos: int
     mensaje: str
+
+
+class MetricaIncidenteListResponse(BaseModel):
+    id_incidente: int
+    titulo: str
+    fecha_reporte: datetime
+    estado_actual: str
+    tiempo_respuesta_seg: int | None = None
+    incidentes_atendidos: int
+    estado_frecuente: str | None = None
+    rendimiento_operativo: str
+    fecha_generacion: datetime
+
+
+class MetricaIncidenteDetailResponse(MetricaIncidenteListResponse):
+    clasificacion_ia: str | None = None
+    prioridad: str | None = None
+    tipo_incidente: str | None = None
+    tiempo_asignacion_seg: int | None = None
+    tiempo_llegada_seg: int | None = None
+    tiempo_resolucion_seg: int | None = None
+    cantidad_rechazos: int
+    fue_reasignado: bool
 

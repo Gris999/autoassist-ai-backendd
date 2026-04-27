@@ -32,9 +32,12 @@ from app.modules.seguimiento_monitoreo_servicio.schemas import (
     DispositivoPushResponse,
     EstadoServicioDetalleResponse,
     HistorialIncidenteEventoResponse,
+    IncidenteTecnicoLlegadaListResponse,
     IncidenteHistorialDetailResponse,
     IncidenteHistorialListResponse,
     IntencionPagoResponse,
+    MarcarLlegadaIncidenteRequest,
+    MarcarLlegadaIncidenteResponse,
     MetodoPagoDisponibleResponse,
     NotificacionCreateRequest,
     NotificacionDetailResponse,
@@ -52,6 +55,10 @@ from app.modules.seguimiento_monitoreo_servicio.repository import (
     create_detalle_pago,
     create_notificacion,
     create_pago_servicio,
+    get_asignacion_llegada_by_incidente_and_tecnico_id_for_update,
+    get_asignaciones_llegada_by_tecnico_id,
+    get_cliente_by_id,
+    get_estado_servicio_by_nombre,
     get_incidente_asignacion_by_id_and_cliente,
     get_incidente_historial_by_id,
     get_incidente_pago_context_by_id_and_cliente,
@@ -69,6 +76,7 @@ from app.modules.seguimiento_monitoreo_servicio.repository import (
     get_pago_servicio_by_referencia_transaccion,
     get_roles_by_usuario_id,
     get_usuario_by_id,
+    upsert_metrica_incidente_llegada,
     update_pago_servicio,
     update_notificacion_leido,
     update_dispositivo_push_activo,
@@ -76,7 +84,12 @@ from app.modules.seguimiento_monitoreo_servicio.repository import (
     upsert_dispositivo_push,
     upsert_comision_plataforma,
 )
-from app.modules.gestion_incidentes_atencion.repository import get_incidente_by_id_and_cliente
+from app.modules.gestion_incidentes_atencion.repository import (
+    create_historial_incidente,
+    get_incidente_by_id_and_cliente,
+    update_asignacion_servicio_estado,
+    update_incidente_estado_servicio_actual,
+)
 
 
 def _get_cliente_autenticado(db: Session, current_user):
@@ -136,6 +149,9 @@ CLASSIFICATION_TO_AUXILIO = {
     "motor": "AUXILIO_MECANICO_BASICO",
     "choque": "REMOLQUE",
 }
+ESTADO_APTO_MARCAR_LLEGADA = "EN_CAMINO"
+ESTADO_SERVICIO_TECNICO_EN_SITIO = "EN_ATENCION"
+TIPO_NOTIFICACION_TECNICO_EN_SITIO = "TECNICO_EN_SITIO"
 
 
 class PaymentConfigurationError(ValueError):
@@ -151,6 +167,10 @@ class PaymentAlreadyCompletedError(ValueError):
 
 
 class PaymentRecordNotFoundError(ValueError):
+    pass
+
+
+class TrackingIncidentNotFoundError(ValueError):
     pass
 
 
@@ -335,6 +355,27 @@ def _to_ubicacion_actual_tecnico_response(
         estado_asignacion=asignacion.estado_asignacion,
         estado_servicio_actual=incidente.estado_servicio_actual.nombre,
         mensaje="Ubicacion actualizada correctamente.",
+    )
+
+
+def _to_incidente_tecnico_llegada_list_response(
+    asignacion,
+) -> IncidenteTecnicoLlegadaListResponse:
+    incidente = asignacion.incidente
+    return IncidenteTecnicoLlegadaListResponse(
+        id_incidente=incidente.id_incidente,
+        id_asignacion=asignacion.id_asignacion,
+        titulo=incidente.titulo,
+        descripcion_texto=incidente.descripcion_texto,
+        direccion_referencia=incidente.direccion_referencia,
+        latitud=incidente.latitud,
+        longitud=incidente.longitud,
+        fecha_reporte=incidente.fecha_reporte,
+        tipo_incidente=incidente.tipo_incidente.nombre,
+        prioridad=incidente.prioridad.nombre,
+        estado_servicio_actual=incidente.estado_servicio_actual.nombre,
+        estado_asignacion=asignacion.estado_asignacion,
+        tiempo_estimado_min=asignacion.tiempo_estimado_min,
     )
 
 
@@ -1466,6 +1507,183 @@ def get_estado_servicio_service(
         resumen_ia=incidente.resumen_ia,
         requiere_mas_info=incidente.requiere_mas_info,
     )
+
+
+def _validar_incidente_apto_para_marcar_llegada(incidente) -> None:
+    if not incidente.estado_servicio_actual:
+        raise ValueError("El incidente no tiene un estado de servicio actual definido.")
+
+    if incidente.estado_servicio_actual.nombre != ESTADO_APTO_MARCAR_LLEGADA:
+        raise ValueError(
+            "El incidente no se encuentra en un estado apto para marcar llegada. "
+            f"Debe estar en {ESTADO_APTO_MARCAR_LLEGADA}."
+        )
+
+
+def _registrar_notificaciones_llegada_tecnico(
+    db: Session,
+    *,
+    incidente,
+    asignacion,
+    current_user,
+    fecha_llegada: datetime,
+) -> int:
+    destinatarios: list[int] = []
+
+    cliente = get_cliente_by_id(db, incidente.id_cliente)
+    if cliente and cliente.id_usuario != current_user.id_usuario:
+        destinatarios.append(cliente.id_usuario)
+
+    if (
+        asignacion.taller
+        and asignacion.taller.id_usuario != current_user.id_usuario
+        and asignacion.taller.id_usuario not in destinatarios
+    ):
+        destinatarios.append(asignacion.taller.id_usuario)
+
+    if not destinatarios:
+        return 0
+
+    mensaje = (
+        "El tecnico asignado ha llegado al lugar del incidente "
+        f"'{incidente.titulo}' el {fecha_llegada.strftime('%Y-%m-%d %H:%M:%S')}."
+    )
+    total = 0
+    for id_usuario_destino in destinatarios:
+        notificacion = create_notificacion(
+            db,
+            id_usuario=id_usuario_destino,
+            id_incidente=incidente.id_incidente,
+            titulo="Tecnico en sitio",
+            mensaje=mensaje,
+            tipo_notificacion=TIPO_NOTIFICACION_TECNICO_EN_SITIO,
+        )
+        dispatch_push_notification_service(db, notificacion)
+        total += 1
+
+    return total
+
+
+def listar_incidentes_asignados_para_llegada_service(
+    db: Session,
+    current_user,
+) -> list[IncidenteTecnicoLlegadaListResponse]:
+    tecnico = _get_tecnico_autenticado(db, current_user)
+    asignaciones = get_asignaciones_llegada_by_tecnico_id(db, tecnico.id_tecnico)
+    return [
+        _to_incidente_tecnico_llegada_list_response(asignacion)
+        for asignacion in asignaciones
+        if asignacion.incidente and asignacion.incidente.estado_servicio_actual
+    ]
+
+
+def marcar_llegada_incidente_service(
+    db: Session,
+    current_user,
+    id_incidente: int,
+    payload: MarcarLlegadaIncidenteRequest,
+) -> MarcarLlegadaIncidenteResponse:
+    tecnico = _get_tecnico_autenticado(db, current_user)
+    incidente = get_incidente_by_id(db, id_incidente)
+    if not incidente:
+        raise TrackingIncidentNotFoundError("El incidente especificado no existe.")
+
+    asignacion = get_asignacion_llegada_by_incidente_and_tecnico_id_for_update(
+        db,
+        id_incidente=id_incidente,
+        id_tecnico=tecnico.id_tecnico,
+    )
+    if not asignacion:
+        raise ValueError("El incidente no esta asignado al tecnico autenticado.")
+
+    incidente_asignado = asignacion.incidente
+    _validar_incidente_apto_para_marcar_llegada(incidente_asignado)
+
+    nuevo_estado = get_estado_servicio_by_nombre(db, ESTADO_SERVICIO_TECNICO_EN_SITIO)
+    if not nuevo_estado:
+        raise ValueError(
+            f"No existe el estado {ESTADO_SERVICIO_TECNICO_EN_SITIO} en la base de datos."
+        )
+    if nuevo_estado.id_estado_servicio == incidente_asignado.id_estado_servicio_actual:
+        raise ValueError("El incidente ya se encuentra en el estado de atencion en sitio.")
+    if nuevo_estado.orden_flujo != incidente_asignado.estado_servicio_actual.orden_flujo + 1:
+        raise ValueError("La transicion de estado para marcar llegada no es valida.")
+
+    fecha_llegada = datetime.utcnow()
+    tiempo_llegada_seg = None
+    if asignacion.fecha_asignacion is not None:
+        tiempo_llegada_seg = max(
+            int((fecha_llegada - asignacion.fecha_asignacion).total_seconds()),
+            0,
+        )
+
+    detalle_historial = (
+        payload.detalle.strip()
+        if payload.detalle and payload.detalle.strip()
+        else "El tecnico marco su llegada al lugar del incidente."
+    )
+    estado_anterior = incidente_asignado.estado_servicio_actual
+
+    try:
+        update_incidente_estado_servicio_actual(
+            db,
+            incidente_asignado,
+            id_estado_servicio_actual=nuevo_estado.id_estado_servicio,
+        )
+        update_asignacion_servicio_estado(
+            db,
+            asignacion,
+            estado_asignacion=nuevo_estado.nombre,
+        )
+        historial = create_historial_incidente(
+            db,
+            id_incidente=incidente_asignado.id_incidente,
+            id_estado_anterior=estado_anterior.id_estado_servicio,
+            id_estado_nuevo=nuevo_estado.id_estado_servicio,
+            id_usuario_actor=current_user.id_usuario,
+            detalle=detalle_historial,
+        )
+        upsert_metrica_incidente_llegada(
+            db,
+            id_incidente=incidente_asignado.id_incidente,
+            tiempo_llegada_seg=tiempo_llegada_seg,
+        )
+        total_notificaciones = _registrar_notificaciones_llegada_tecnico(
+            db,
+            incidente=incidente_asignado,
+            asignacion=asignacion,
+            current_user=current_user,
+            fecha_llegada=historial.fecha_hora,
+        )
+
+        db.commit()
+        response = MarcarLlegadaIncidenteResponse(
+            id_incidente=incidente_asignado.id_incidente,
+            id_asignacion=asignacion.id_asignacion,
+            id_tecnico=tecnico.id_tecnico,
+            fecha_llegada=historial.fecha_hora,
+            id_estado_anterior=estado_anterior.id_estado_servicio,
+            estado_anterior=estado_anterior.nombre,
+            id_estado_nuevo=nuevo_estado.id_estado_servicio,
+            estado_nuevo=nuevo_estado.nombre,
+            estado_asignacion=asignacion.estado_asignacion,
+            tiempo_llegada_seg=tiempo_llegada_seg,
+            historial_registrado=True,
+            notificaciones_emitidas=total_notificaciones,
+            validacion_geografica_aplicada=False,
+            mensaje="Llegada al incidente registrada correctamente.",
+        )
+        _emitir_actualizacion_tiempo_real(
+            incidente_asignado.id_incidente,
+            {
+                "type": "tecnico_en_sitio",
+                "payload": response.model_dump(mode="json"),
+            },
+        )
+        return response
+    except Exception:
+        db.rollback()
+        raise
 
 
 def actualizar_ubicacion_actual_tecnico_service(

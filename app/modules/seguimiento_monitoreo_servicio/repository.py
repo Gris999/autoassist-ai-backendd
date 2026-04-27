@@ -2,8 +2,10 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session, joinedload
 
 from app.modules.autenticacion_seguridad.models import Rol, Usuario, UsuarioRol
+from app.modules.gestion_clientes.models import Cliente
 from app.modules.gestion_incidentes_atencion.models import (
     AsignacionServicio,
+    EstadoServicio,
     HistorialIncidente,
     Incidente,
     SolicitudTaller,
@@ -18,6 +20,7 @@ from app.modules.seguimiento_monitoreo_servicio.models import (
     ComisionPlataforma,
     DetallePago,
     DispositivoPushUsuario,
+    MetricaIncidente,
     Notificacion,
     PagoServicio,
 )
@@ -98,6 +101,100 @@ def get_incidente_by_id(db: Session, id_incidente: int) -> Incidente | None:
     return db.execute(
         select(Incidente).where(Incidente.id_incidente == id_incidente)
     ).scalar_one_or_none()
+
+
+def get_cliente_by_id(db: Session, id_cliente: int) -> Cliente | None:
+    return db.execute(
+        select(Cliente).where(Cliente.id_cliente == id_cliente)
+    ).scalar_one_or_none()
+
+
+def get_asignaciones_llegada_by_tecnico_id(
+    db: Session,
+    id_tecnico: int,
+) -> list[AsignacionServicio]:
+    return list(
+        db.execute(
+            select(AsignacionServicio)
+            .options(
+                joinedload(AsignacionServicio.incidente).joinedload(Incidente.tipo_incidente),
+                joinedload(AsignacionServicio.incidente).joinedload(Incidente.prioridad),
+                joinedload(AsignacionServicio.incidente).joinedload(Incidente.estado_servicio_actual),
+                joinedload(AsignacionServicio.taller.of_type(Taller)),
+                joinedload(AsignacionServicio.unidad_movil.of_type(UnidadMovil)),
+            )
+            .join(AsignacionServicio.incidente)
+            .join(Incidente.estado_servicio_actual)
+            .where(
+                AsignacionServicio.id_tecnico == id_tecnico,
+                EstadoServicio.nombre == "EN_CAMINO",
+            )
+            .order_by(AsignacionServicio.fecha_asignacion.desc())
+        ).scalars()
+    )
+
+
+def get_asignacion_llegada_by_incidente_and_tecnico_id_for_update(
+    db: Session,
+    *,
+    id_incidente: int,
+    id_tecnico: int,
+) -> AsignacionServicio | None:
+    return db.execute(
+        select(AsignacionServicio)
+        .options(
+            joinedload(AsignacionServicio.incidente).joinedload(Incidente.tipo_incidente),
+            joinedload(AsignacionServicio.incidente).joinedload(Incidente.prioridad),
+            joinedload(AsignacionServicio.incidente).joinedload(Incidente.estado_servicio_actual),
+            joinedload(AsignacionServicio.taller.of_type(Taller)),
+            joinedload(AsignacionServicio.unidad_movil.of_type(UnidadMovil)),
+        )
+        .where(
+            AsignacionServicio.id_incidente == id_incidente,
+            AsignacionServicio.id_tecnico == id_tecnico,
+        )
+        .with_for_update()
+    ).scalar_one_or_none()
+
+
+def get_estado_servicio_by_nombre(db: Session, nombre: str) -> EstadoServicio | None:
+    return db.execute(
+        select(EstadoServicio).where(EstadoServicio.nombre == nombre)
+    ).scalar_one_or_none()
+
+
+def get_metrica_incidente_by_incidente_id(
+    db: Session,
+    id_incidente: int,
+) -> MetricaIncidente | None:
+    return db.execute(
+        select(MetricaIncidente).where(MetricaIncidente.id_incidente == id_incidente)
+    ).scalar_one_or_none()
+
+
+def upsert_metrica_incidente_llegada(
+    db: Session,
+    *,
+    id_incidente: int,
+    tiempo_llegada_seg: int | None,
+) -> MetricaIncidente:
+    metrica = get_metrica_incidente_by_incidente_id(db, id_incidente)
+    tiempo_normalizado = (
+        max(int(tiempo_llegada_seg), 0)
+        if tiempo_llegada_seg is not None
+        else None
+    )
+    if metrica is None:
+        metrica = MetricaIncidente(
+            id_incidente=id_incidente,
+            tiempo_llegada_seg=tiempo_normalizado,
+        )
+        db.add(metrica)
+    else:
+        metrica.tiempo_llegada_seg = tiempo_normalizado
+    db.flush()
+    db.refresh(metrica)
+    return metrica
 
 
 def get_notificaciones_by_usuario_id(db: Session, id_usuario: int) -> list[Notificacion]:

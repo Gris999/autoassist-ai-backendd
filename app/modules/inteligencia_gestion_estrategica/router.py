@@ -3,6 +3,8 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.core.db.session import get_db
+from app.modules.autenticacion_seguridad.models import Usuario
+from app.modules.autenticacion_seguridad.permissions import require_roles
 from app.modules.inteligencia_gestion_estrategica.schemas import (
     AnalisisImagenRoboflowResponse,
     AnalizarImagenIncidenteRequest,
@@ -10,6 +12,8 @@ from app.modules.inteligencia_gestion_estrategica.schemas import (
     AnalisisIncidenteResponse,
     AsignacionInteligenteResponse,
     EvidenciaProcesadaResponse,
+    MetricaIncidenteDetailResponse,
+    MetricaIncidenteListResponse,
     RegistrarEvidenciaProcesadaRequest,
     SolicitudMasInformacionResponse,
 )
@@ -23,7 +27,9 @@ from app.modules.inteligencia_gestion_estrategica.service import (
     IncidentUserNotFoundError,
     IncidentVehicleNotFoundError,
     ImageEvidenceNotFoundError,
+    listar_metricas_incidentes_service,
     NoCandidateTallerFoundError,
+    obtener_metrica_incidente_service,
     RoboflowConfigurationError,
     analizar_imagen_incidente_roboflow_service,
     asignar_taller_inteligentemente_service,
@@ -248,4 +254,56 @@ def asignar_taller_inteligente(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Ocurrio un error inesperado al calcular la asignacion inteligente de taller.",
+        ) from exc
+
+
+@router.get(
+    "/metricas/incidentes",
+    response_model=list[MetricaIncidenteListResponse],
+    status_code=status.HTTP_200_OK,
+)
+def listar_metricas_incidentes(
+    current_user: Usuario = Depends(require_roles("ADMIN")),
+    db: Session = Depends(get_db),
+):
+    try:
+        return listar_metricas_incidentes_service(db)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Ocurrio un error inesperado al generar las metricas de incidentes.",
+        ) from exc
+
+
+@router.get(
+    "/metricas/incidentes/{id_incidente}",
+    response_model=MetricaIncidenteDetailResponse,
+    status_code=status.HTTP_200_OK,
+)
+def obtener_metrica_incidente(
+    id_incidente: int,
+    current_user: Usuario = Depends(require_roles("ADMIN")),
+    db: Session = Depends(get_db),
+):
+    try:
+        return obtener_metrica_incidente_service(db, id_incidente)
+    except IncidentNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Ocurrio un error inesperado al generar la metrica del incidente.",
         ) from exc

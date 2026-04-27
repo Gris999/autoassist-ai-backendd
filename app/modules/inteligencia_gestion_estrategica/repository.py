@@ -8,6 +8,7 @@ from app.modules.gestion_clientes.models import Cliente, Vehiculo
 from app.modules.gestion_incidentes_atencion.models import (
     AsignacionServicio,
     Evidencia,
+    HistorialIncidente,
     Incidente,
     Prioridad,
     SolicitudTaller,
@@ -20,6 +21,7 @@ from app.modules.gestion_operativa_taller_tecnico.models import (
     UnidadMovil,
 )
 from app.modules.seguimiento_monitoreo_servicio.models import Notificacion
+from app.modules.seguimiento_monitoreo_servicio.models import MetricaIncidente
 
 
 def get_incidente_by_id(db: Session, id_incidente: int) -> Incidente | None:
@@ -192,6 +194,83 @@ def get_incidente_with_assignment_context(db: Session, id_incidente: int) -> Inc
         )
         .where(Incidente.id_incidente == id_incidente)
     ).scalar_one_or_none()
+
+
+def list_incidentes_metrics_context(db: Session) -> list[Incidente]:
+    return list(
+        db.execute(
+            select(Incidente)
+            .options(
+                joinedload(Incidente.tipo_incidente),
+                joinedload(Incidente.prioridad),
+                joinedload(Incidente.estado_servicio_actual),
+                joinedload(Incidente.asignacion_servicio),
+                joinedload(Incidente.solicitudes_taller),
+                joinedload(Incidente.historial).joinedload(HistorialIncidente.estado_nuevo),
+                joinedload(Incidente.historial).joinedload(HistorialIncidente.estado_anterior),
+            )
+            .order_by(Incidente.fecha_reporte.desc(), Incidente.id_incidente.desc())
+        ).unique().scalars()
+    )
+
+
+def get_incidente_metrics_context_by_id(db: Session, id_incidente: int) -> Incidente | None:
+    return db.execute(
+        select(Incidente)
+        .options(
+            joinedload(Incidente.tipo_incidente),
+            joinedload(Incidente.prioridad),
+            joinedload(Incidente.estado_servicio_actual),
+            joinedload(Incidente.asignacion_servicio),
+            joinedload(Incidente.solicitudes_taller),
+            joinedload(Incidente.historial).joinedload(HistorialIncidente.estado_nuevo),
+            joinedload(Incidente.historial).joinedload(HistorialIncidente.estado_anterior),
+        )
+        .where(Incidente.id_incidente == id_incidente)
+    ).unique().scalar_one_or_none()
+
+
+def get_metrica_incidente_by_incidente_id(
+    db: Session,
+    id_incidente: int,
+) -> MetricaIncidente | None:
+    return db.execute(
+        select(MetricaIncidente).where(MetricaIncidente.id_incidente == id_incidente)
+    ).scalar_one_or_none()
+
+
+def upsert_metrica_incidente(
+    db: Session,
+    *,
+    incidente: Incidente,
+    tiempo_asignacion_seg: int | None,
+    tiempo_llegada_seg: int | None,
+    tiempo_resolucion_seg: int | None,
+    cantidad_rechazos: int,
+    fue_reasignado: bool,
+) -> MetricaIncidente:
+    metrica = get_metrica_incidente_by_incidente_id(db, incidente.id_incidente)
+    if metrica is None:
+        metrica = MetricaIncidente(
+            id_incidente=incidente.id_incidente,
+            tiempo_asignacion_seg=tiempo_asignacion_seg,
+            tiempo_llegada_seg=tiempo_llegada_seg,
+            tiempo_resolucion_seg=tiempo_resolucion_seg,
+            cantidad_rechazos=max(cantidad_rechazos, 0),
+            fue_reasignado=fue_reasignado,
+        )
+        db.add(metrica)
+    else:
+        metrica.tiempo_asignacion_seg = tiempo_asignacion_seg
+        metrica.tiempo_llegada_seg = tiempo_llegada_seg
+        metrica.tiempo_resolucion_seg = tiempo_resolucion_seg
+        metrica.cantidad_rechazos = max(cantidad_rechazos, 0)
+        metrica.fue_reasignado = fue_reasignado
+        metrica.fecha_registro = datetime.utcnow()
+
+    db.flush()
+    db.refresh(metrica)
+    return metrica
 
 
 def list_available_talleres_with_resources(db: Session) -> list[Taller]:

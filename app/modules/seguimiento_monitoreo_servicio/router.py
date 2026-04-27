@@ -17,9 +17,12 @@ from app.modules.seguimiento_monitoreo_servicio.schemas import (
     DispositivoPushRegisterRequest,
     DispositivoPushResponse,
     EstadoServicioDetalleResponse,
+    IncidenteTecnicoLlegadaListResponse,
     IncidenteHistorialDetailResponse,
     IncidenteHistorialListResponse,
     IntencionPagoResponse,
+    MarcarLlegadaIncidenteRequest,
+    MarcarLlegadaIncidenteResponse,
     NotificacionDetailResponse,
     NotificacionLeidaResponse,
     NotificacionListResponse,
@@ -40,8 +43,10 @@ from app.modules.seguimiento_monitoreo_servicio.service import (
     get_estado_servicio_service,
     listar_dispositivos_push_service,
     listar_incidentes_historial_service,
+    listar_incidentes_asignados_para_llegada_service,
     listar_incidentes_cliente_service,
     listar_notificaciones_service,
+    marcar_llegada_incidente_service,
     marcar_notificacion_leida_service,
     obtener_comprobante_pago_service,
     obtener_detalle_pago_incidente_service,
@@ -49,6 +54,7 @@ from app.modules.seguimiento_monitoreo_servicio.service import (
     obtener_notificacion_service,
     procesar_webhook_stripe_service,
     registrar_dispositivo_push_service,
+    TrackingIncidentNotFoundError,
     validar_acceso_incidente_seguimiento_service,
 )
 
@@ -238,6 +244,54 @@ def actualizar_ubicacion_actual_tecnico(
             current_user,
             id_incidente,
             payload,
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
+
+@router.get(
+    "/tecnico/incidentes-asignados/llegada",
+    response_model=list[IncidenteTecnicoLlegadaListResponse],
+    status_code=status.HTTP_200_OK,
+)
+def listar_incidentes_asignados_para_llegada(
+    current_user: Usuario = Depends(require_roles("TECNICO")),
+    db: Session = Depends(get_db),
+):
+    try:
+        return listar_incidentes_asignados_para_llegada_service(db, current_user)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
+
+@router.patch(
+    "/tecnico/incidentes/{id_incidente}/marcar-llegada",
+    response_model=MarcarLlegadaIncidenteResponse,
+    status_code=status.HTTP_200_OK,
+)
+def marcar_llegada_incidente(
+    id_incidente: int,
+    payload: MarcarLlegadaIncidenteRequest,
+    current_user: Usuario = Depends(require_roles("TECNICO")),
+    db: Session = Depends(get_db),
+):
+    try:
+        return marcar_llegada_incidente_service(
+            db,
+            current_user,
+            id_incidente,
+            payload,
+        )
+    except TrackingIncidentNotFoundError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e),
         )
     except ValueError as e:
         raise HTTPException(

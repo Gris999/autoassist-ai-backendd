@@ -1,5 +1,6 @@
 import json
 import unicodedata
+from collections import Counter
 from decimal import Decimal
 from math import asin, cos, radians, sin, sqrt
 
@@ -15,14 +16,18 @@ from app.modules.inteligencia_gestion_estrategica.repository import (
     get_evidencia_by_id_and_incidente_id,
     get_evidencia_textos_by_incidente_id,
     get_incidente_by_id,
+    get_incidente_metrics_context_by_id,
     get_incidente_with_assignment_context,
     get_latest_image_evidence_by_incidente_id,
+    get_metrica_incidente_by_incidente_id,
     get_prioridad_by_nombre,
     get_pending_notification_by_incidente_usuario_tipo,
     get_solicitud_taller_by_incidente_and_taller,
     get_usuario_by_id,
+    list_incidentes_metrics_context,
     list_available_talleres_with_resources,
     list_evidences_by_incidente_id,
+    upsert_metrica_incidente,
     update_solicitud_taller_candidate_data,
     update_incidente_analysis_result,
 )
@@ -34,6 +39,8 @@ from app.modules.inteligencia_gestion_estrategica.schemas import (
     AnalisisIncidenteResponse,
     AsignacionInteligenteResponse,
     EvidenciaProcesadaResponse,
+    MetricaIncidenteDetailResponse,
+    MetricaIncidenteListResponse,
     RegistrarEvidenciaProcesadaRequest,
     SolicitudMasInformacionResponse,
     TallerCandidatoResponse,
@@ -214,6 +221,10 @@ class ImageEvidenceNotFoundError(LookupError):
 
 
 class RoboflowConfigurationError(ValueError):
+    pass
+
+
+class MetricsNotAvailableError(ValueError):
     pass
 
 
@@ -1037,6 +1048,211 @@ def _build_taller_candidate_response(
     )
 
 
+def _seconds_between(start, end) -> int | None:
+    if start is None or end is None:
+        return None
+    return max(int((end - start).total_seconds()), 0)
+
+
+def _find_first_estado_timestamp(incidente, estado_nombre: str):
+    matching_dates = [
+        historial.fecha_hora
+        for historial in incidente.historial
+        if historial.estado_nuevo and historial.estado_nuevo.nombre == estado_nombre
+    ]
+    if not matching_dates:
+        return None
+    return min(matching_dates)
+
+
+def _resolve_estado_frecuente(incidente) -> str | None:
+    state_names = [
+        historial.estado_nuevo.nombre
+        for historial in incidente.historial
+        if historial.estado_nuevo and historial.estado_nuevo.nombre
+    ]
+    if incidente.estado_servicio_actual and incidente.estado_servicio_actual.nombre:
+        state_names.append(incidente.estado_servicio_actual.nombre)
+    if not state_names:
+        return None
+    return Counter(state_names).most_common(1)[0][0]
+
+
+def _resolve_incidentes_atendidos(incidente, tiempo_llegada_seg: int | None) -> int:
+    if tiempo_llegada_seg is not None:
+        return 1
+    estado_actual = (
+        incidente.estado_servicio_actual.nombre
+        if incidente.estado_servicio_actual
+        else ""
+    )
+    return 1 if estado_actual in {"EN_ATENCION", "FINALIZADO"} else 0
+
+
+def _resolve_rendimiento_operativo(
+    *,
+    tiempo_asignacion_seg: int | None,
+    tiempo_llegada_seg: int | None,
+    tiempo_resolucion_seg: int | None,
+    incidentes_atendidos: int,
+) -> str:
+    if tiempo_resolucion_seg is not None:
+        if tiempo_resolucion_seg <= 3600:
+            return "alto"
+        if tiempo_resolucion_seg <= 7200:
+            return "medio"
+        return "bajo"
+    if tiempo_llegada_seg is not None:
+        if tiempo_llegada_seg <= 1800:
+            return "alto"
+        if tiempo_llegada_seg <= 3600:
+            return "medio"
+        return "bajo"
+    if tiempo_asignacion_seg is not None:
+        if tiempo_asignacion_seg <= 600:
+            return "alto"
+        if tiempo_asignacion_seg <= 1800:
+            return "medio"
+        return "bajo"
+    if incidentes_atendidos:
+        return "medio"
+    return "sin_datos"
+
+
+def _build_metric_snapshot(db: Session, incidente):
+    metrica_existente = get_metrica_incidente_by_incidente_id(db, incidente.id_incidente)
+    asignacion = incidente.asignacion_servicio
+
+    tiempo_asignacion_seg = (
+        metrica_existente.tiempo_asignacion_seg
+        if metrica_existente and metrica_existente.tiempo_asignacion_seg is not None
+        else _seconds_between(
+            incidente.fecha_reporte,
+            asignacion.fecha_asignacion if asignacion else None,
+        )
+    )
+
+    tiempo_llegada_seg = (
+        metrica_existente.tiempo_llegada_seg
+        if metrica_existente and metrica_existente.tiempo_llegada_seg is not None
+        else _seconds_between(
+            asignacion.fecha_asignacion if asignacion else None,
+            _find_first_estado_timestamp(incidente, "EN_ATENCION"),
+        )
+    )
+
+    tiempo_resolucion_seg = (
+        metrica_existente.tiempo_resolucion_seg
+        if metrica_existente and metrica_existente.tiempo_resolucion_seg is not None
+        else _seconds_between(
+            incidente.fecha_reporte,
+            _find_first_estado_timestamp(incidente, "FINALIZADO"),
+        )
+    )
+
+    rechazos_calculados = sum(
+        1
+        for solicitud in incidente.solicitudes_taller
+        if solicitud.estado_solicitud == "RECHAZADA"
+    )
+    cantidad_rechazos = max(
+        rechazos_calculados,
+        metrica_existente.cantidad_rechazos if metrica_existente else 0,
+    )
+
+    talleres_involucrados = {
+        solicitud.id_taller
+        for solicitud in incidente.solicitudes_taller
+        if solicitud.id_taller is not None
+    }
+    fue_reasignado = bool(
+        (metrica_existente.fue_reasignado if metrica_existente else False)
+        or cantidad_rechazos > 0
+        or len(talleres_involucrados) > 1
+    )
+
+    estado_frecuente = _resolve_estado_frecuente(incidente)
+    incidentes_atendidos = _resolve_incidentes_atendidos(
+        incidente,
+        tiempo_llegada_seg,
+    )
+    rendimiento_operativo = _resolve_rendimiento_operativo(
+        tiempo_asignacion_seg=tiempo_asignacion_seg,
+        tiempo_llegada_seg=tiempo_llegada_seg,
+        tiempo_resolucion_seg=tiempo_resolucion_seg,
+        incidentes_atendidos=incidentes_atendidos,
+    )
+
+    metrica = upsert_metrica_incidente(
+        db,
+        incidente=incidente,
+        tiempo_asignacion_seg=tiempo_asignacion_seg,
+        tiempo_llegada_seg=tiempo_llegada_seg,
+        tiempo_resolucion_seg=tiempo_resolucion_seg,
+        cantidad_rechazos=cantidad_rechazos,
+        fue_reasignado=fue_reasignado,
+    )
+
+    return {
+        "metrica": metrica,
+        "tiempo_respuesta_seg": tiempo_asignacion_seg,
+        "incidentes_atendidos": incidentes_atendidos,
+        "estado_frecuente": estado_frecuente,
+        "rendimiento_operativo": rendimiento_operativo,
+    }
+
+
+def _to_metrica_incidente_list_response(
+    incidente,
+    snapshot: dict,
+) -> MetricaIncidenteListResponse:
+    return MetricaIncidenteListResponse(
+        id_incidente=incidente.id_incidente,
+        titulo=incidente.titulo,
+        fecha_reporte=incidente.fecha_reporte,
+        estado_actual=(
+            incidente.estado_servicio_actual.nombre
+            if incidente.estado_servicio_actual
+            else "SIN_ESTADO"
+        ),
+        tiempo_respuesta_seg=snapshot["tiempo_respuesta_seg"],
+        incidentes_atendidos=snapshot["incidentes_atendidos"],
+        estado_frecuente=snapshot["estado_frecuente"],
+        rendimiento_operativo=snapshot["rendimiento_operativo"],
+        fecha_generacion=snapshot["metrica"].fecha_registro,
+    )
+
+
+def _to_metrica_incidente_detail_response(
+    incidente,
+    snapshot: dict,
+) -> MetricaIncidenteDetailResponse:
+    metrica = snapshot["metrica"]
+    return MetricaIncidenteDetailResponse(
+        id_incidente=incidente.id_incidente,
+        titulo=incidente.titulo,
+        fecha_reporte=incidente.fecha_reporte,
+        estado_actual=(
+            incidente.estado_servicio_actual.nombre
+            if incidente.estado_servicio_actual
+            else "SIN_ESTADO"
+        ),
+        tiempo_respuesta_seg=snapshot["tiempo_respuesta_seg"],
+        incidentes_atendidos=snapshot["incidentes_atendidos"],
+        estado_frecuente=snapshot["estado_frecuente"],
+        rendimiento_operativo=snapshot["rendimiento_operativo"],
+        fecha_generacion=metrica.fecha_registro,
+        clasificacion_ia=incidente.clasificacion_ia,
+        prioridad=incidente.prioridad.nombre if incidente.prioridad else None,
+        tipo_incidente=incidente.tipo_incidente.nombre if incidente.tipo_incidente else None,
+        tiempo_asignacion_seg=metrica.tiempo_asignacion_seg,
+        tiempo_llegada_seg=metrica.tiempo_llegada_seg,
+        tiempo_resolucion_seg=metrica.tiempo_resolucion_seg,
+        cantidad_rechazos=metrica.cantidad_rechazos,
+        fue_reasignado=metrica.fue_reasignado,
+    )
+
+
 def _run_rule_based_incident_analysis(
     *,
     id_incidente: int | None,
@@ -1511,3 +1727,42 @@ def asignar_taller_inteligentemente_service(
         total_candidatos=len(candidatos_registrados),
         mensaje="Taller recomendado correctamente.",
     )
+
+
+def listar_metricas_incidentes_service(
+    db: Session,
+) -> list[MetricaIncidenteListResponse]:
+    incidentes = list_incidentes_metrics_context(db)
+    if not incidentes:
+        return []
+
+    try:
+        metricas = [
+            _to_metrica_incidente_list_response(
+                incidente,
+                _build_metric_snapshot(db, incidente),
+            )
+            for incidente in incidentes
+        ]
+        db.commit()
+        return metricas
+    except Exception:
+        db.rollback()
+        raise
+
+
+def obtener_metrica_incidente_service(
+    db: Session,
+    id_incidente: int,
+) -> MetricaIncidenteDetailResponse:
+    incidente = get_incidente_metrics_context_by_id(db, id_incidente)
+    if not incidente:
+        raise IncidentNotFoundError("El incidente especificado no existe.")
+
+    try:
+        snapshot = _build_metric_snapshot(db, incidente)
+        db.commit()
+        return _to_metrica_incidente_detail_response(incidente, snapshot)
+    except Exception:
+        db.rollback()
+        raise

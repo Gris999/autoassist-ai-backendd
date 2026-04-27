@@ -104,6 +104,50 @@ class AsignacionAuxilioDetalleResponse(BaseModel):
     modelo_vehiculo: str | None = None
 
 
+class IncidenteTecnicoLlegadaListResponse(BaseModel):
+    id_incidente: int
+    id_asignacion: int
+    titulo: str
+    descripcion_texto: str | None = None
+    direccion_referencia: str | None = None
+    latitud: Decimal | None = None
+    longitud: Decimal | None = None
+    fecha_reporte: datetime
+    tipo_incidente: str
+    prioridad: str
+    estado_servicio_actual: str
+    estado_asignacion: str
+    tiempo_estimado_min: int | None = None
+
+
+class MarcarLlegadaIncidenteRequest(BaseModel):
+    confirmar_llegada: bool = True
+    detalle: str | None = Field(default=None, max_length=500)
+
+    @model_validator(mode="after")
+    def validar_confirmacion(self):
+        if not self.confirmar_llegada:
+            raise ValueError("Debe confirmar la llegada para registrar la accion.")
+        return self
+
+
+class MarcarLlegadaIncidenteResponse(BaseModel):
+    id_incidente: int
+    id_asignacion: int
+    id_tecnico: int
+    fecha_llegada: datetime
+    id_estado_anterior: int
+    estado_anterior: str
+    id_estado_nuevo: int
+    estado_nuevo: str
+    estado_asignacion: str
+    tiempo_llegada_seg: int | None = None
+    historial_registrado: bool
+    notificaciones_emitidas: int
+    validacion_geografica_aplicada: bool
+    mensaje: str
+
+
 class NotificacionCreateRequest(BaseModel):
     id_usuario: int
     id_incidente: int | None = None
