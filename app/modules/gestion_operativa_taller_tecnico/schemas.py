@@ -85,6 +85,16 @@ class TallerInfoResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class TipoAuxilioCatalogResponse(BaseModel):
+    id_tipo_auxilio: int
+    nombre: str
+    descripcion: str | None = None
+    requiere_unidad_movil: bool
+    requiere_remolque: bool
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class TallerAuxilioCreateRequest(BaseModel):
     id_tipo_auxilio: int
     precio_referencial: float = Field(ge=0)

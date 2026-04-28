@@ -128,6 +128,16 @@ def get_tipo_auxilio_by_id(db: Session, id_tipo_auxilio: int) -> TipoAuxilio | N
     ).scalar_one_or_none()
 
 
+def list_tipos_auxilio_disponibles(db: Session) -> list[TipoAuxilio]:
+    return list(
+        db.execute(
+            select(TipoAuxilio)
+            .where(TipoAuxilio.estado == True)
+            .order_by(TipoAuxilio.id_tipo_auxilio.asc())
+        ).scalars()
+    )
+
+
 def get_servicios_auxilio_por_taller_id(db: Session, id_taller: int) -> list[TallerAuxilio]:
     return list(
         db.execute(

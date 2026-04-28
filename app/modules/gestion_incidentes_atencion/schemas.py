@@ -5,6 +5,31 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 
+class EvidenciaCreateRequest(BaseModel):
+    tipo_evidencia: str = Field(min_length=2, max_length=50)
+    archivo_url: str = Field(min_length=3, max_length=500)
+    texto_extraido: str | None = Field(default=None, max_length=5000)
+    descripcion: str | None = Field(default=None, max_length=255)
+
+
+class EvidenciaUploadResponse(BaseModel):
+    tipo_evidencia: str
+    archivo_url: str
+    nombre_archivo: str
+    tamano_bytes: int
+    content_type: str | None = None
+
+
+class AudioTranscriptionRequest(BaseModel):
+    archivo_url: str = Field(min_length=3, max_length=500)
+
+
+class AudioTranscriptionResponse(BaseModel):
+    archivo_url: str
+    texto_extraido: str
+    mensaje: str
+
+
 class IncidenteCreateRequest(BaseModel):
     id_vehiculo: int
     id_tipo_incidente: int
@@ -13,6 +38,15 @@ class IncidenteCreateRequest(BaseModel):
     direccion_referencia: str | None = Field(default=None, max_length=255)
     latitud: Decimal | None = None
     longitud: Decimal | None = None
+    evidencias: list[EvidenciaCreateRequest] = Field(default_factory=list)
+
+
+class CompletarInformacionIncidenteRequest(BaseModel):
+    descripcion_texto: str | None = Field(default=None, max_length=2000)
+    direccion_referencia: str | None = Field(default=None, max_length=255)
+    latitud: Decimal | None = None
+    longitud: Decimal | None = None
+    evidencias: list[EvidenciaCreateRequest] = Field(default_factory=list)
 
 
 class TipoIncidenteResponse(BaseModel):
@@ -59,6 +93,10 @@ class IncidenteDisponibleResponse(BaseModel):
     latitud: Decimal | None = None
     longitud: Decimal | None = None
     fecha_reporte: datetime
+    fecha_envio: datetime
+    distancia_km: Decimal | None = None
+    puntaje_asignacion: Decimal | None = None
+    estado_solicitud: str
 
     id_vehiculo: int
     id_tipo_incidente: int

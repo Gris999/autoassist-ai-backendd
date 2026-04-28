@@ -1,13 +1,33 @@
+from pathlib import Path
+from uuid import uuid4
+
+from fastapi import UploadFile
 from sqlalchemy.orm import Session
 
+from app.core.config.settings import settings
 from app.modules.gestion_operativa_taller_tecnico.repository import (
     get_taller_by_usuario_id,
     get_tecnico_by_usuario_id,
+    get_tecnico_with_usuario_by_id,
+    get_unidad_movil_by_id,
 )
 from app.modules.gestion_clientes.repository import get_cliente_by_usuario_id
+from app.modules.inteligencia_gestion_estrategica.service import (
+    orquestar_incidente_reportado_service,
+    transcribir_audio_desde_url_service,
+)
+from app.modules.seguimiento_monitoreo_servicio.repository import (
+    create_notificacion,
+    get_cliente_by_id,
+)
+from app.modules.seguimiento_monitoreo_servicio.service import (
+    dispatch_push_notification_service,
+)
 from app.modules.gestion_incidentes_atencion.repository import (
+    cancel_pending_solicitudes_by_incidente_except,
     create_historial_incidente,
     create_asignacion_servicio,
+    create_evidencia,
     create_incidente,
     get_asignacion_servicio_by_incidente_id,
     get_asignacion_servicio_by_incidente_id_for_update,
@@ -31,6 +51,7 @@ from app.modules.gestion_incidentes_atencion.repository import (
     get_unidad_movil_by_id_for_update,
     get_unidades_moviles_disponibles_by_taller_id,
     get_vehiculo_by_id_and_cliente,
+    get_incidentes_disponibles_by_taller_id,
     update_tecnico_disponibilidad,
     update_incidente_estado_servicio_actual,
     update_solicitud_taller_respuesta,
@@ -42,13 +63,16 @@ from app.modules.gestion_incidentes_atencion.schemas import (
     ActualizarEstadoServicioRequest,
     AsignacionIncidenteRequest,
     AsignacionIncidenteResponse,
+    CompletarInformacionIncidenteRequest,
     EvidenciaIncidenteResponse,
+    EvidenciaUploadResponse,
     EstadoServicioIncidenteResponse,
     IncidenteAsignadoDetailResponse,
     IncidenteAsignadoListResponse,
     IncidenteCreateRequest,
     IncidenteResponse,
     IncidenteDisponibleResponse,
+    AudioTranscriptionResponse,
     ResponderSolicitudAtencionRequest,
     RespuestaSolicitudAtencionResponse,
     SolicitudAtencionDetalleResponse,
@@ -60,7 +84,10 @@ from app.modules.gestion_incidentes_atencion.schemas import (
 ESTADO_SOLICITUD_PENDIENTE = "PENDIENTE"
 ESTADO_SOLICITUD_ACEPTADA = "ACEPTADA"
 ESTADO_SOLICITUD_RECHAZADA = "RECHAZADA"
+ESTADO_SOLICITUD_CANCELADA = "CANCELADA"
 ESTADO_ASIGNACION_SERVICIO = "ASIGNADO"
+TIPO_NOTIFICACION_TALLER_ACEPTO = "TALLER_ACEPTO"
+TIPO_NOTIFICACION_ASIGNACION_TECNICO = "ASIGNACION_TECNICO"
 ESTADOS_FINALES_SERVICIO = {"FINALIZADO", "CANCELADO"}
 ESTADOS_CONSULTABLES_TECNICO = {"ASIGNADO", "EN_CAMINO", "EN_ATENCION", "FINALIZADO"}
 ESTADOS_INCIDENTE_NO_DISPONIBLE_RESPUESTA = {
@@ -69,6 +96,44 @@ ESTADOS_INCIDENTE_NO_DISPONIBLE_RESPUESTA = {
     "EN_ATENCION",
     "FINALIZADO",
     "CANCELADO",
+}
+ALLOWED_EVIDENCIA_UPLOAD_TYPES = {
+    "image/jpeg": "IMAGEN",
+    "image/jpg": "IMAGEN",
+    "image/png": "IMAGEN",
+    "image/webp": "IMAGEN",
+    "video/mp4": "VIDEO",
+    "video/quicktime": "VIDEO",
+    "video/x-msvideo": "VIDEO",
+    "video/webm": "VIDEO",
+    "video/mpeg": "VIDEO",
+    "audio/mpeg": "AUDIO",
+    "audio/mp3": "AUDIO",
+    "audio/wav": "AUDIO",
+    "audio/x-wav": "AUDIO",
+    "audio/mp4": "AUDIO",
+    "audio/x-m4a": "AUDIO",
+    "audio/aac": "AUDIO",
+    "audio/ogg": "AUDIO",
+    "audio/webm": "AUDIO",
+}
+ALLOWED_EVIDENCIA_EXTENSIONS = {
+    ".jpg": "IMAGEN",
+    ".jpeg": "IMAGEN",
+    ".png": "IMAGEN",
+    ".webp": "IMAGEN",
+    ".mp4": "VIDEO",
+    ".mov": "VIDEO",
+    ".avi": "VIDEO",
+    ".webm": "VIDEO",
+    ".mpeg": "VIDEO",
+    ".mpg": "VIDEO",
+    ".mp3": "AUDIO",
+    ".wav": "AUDIO",
+    ".m4a": "AUDIO",
+    ".aac": "AUDIO",
+    ".ogg": "AUDIO",
+    ".webm": "AUDIO",
 }
 
 
@@ -165,6 +230,65 @@ def _to_incidente_disponible_response(
 def _validar_incidente_disponible_para_respuesta(incidente) -> None:
     if incidente.estado_servicio_actual.nombre in ESTADOS_INCIDENTE_NO_DISPONIBLE_RESPUESTA:
         raise ValueError("El incidente ya no se encuentra disponible para responder esta solicitud.")
+
+
+def _registrar_notificacion_taller_acepto(db: Session, *, incidente, taller) -> None:
+    cliente = get_cliente_by_id(db, incidente.id_cliente)
+    if not cliente:
+        return
+
+    notificacion = create_notificacion(
+        db,
+        id_usuario=cliente.id_usuario,
+        id_incidente=incidente.id_incidente,
+        titulo="Taller acepto tu solicitud",
+        mensaje=(
+            f"El taller '{taller.nombre_taller}' acepto la atencion de tu incidente "
+            f"'{incidente.titulo}'."
+        ),
+        tipo_notificacion=TIPO_NOTIFICACION_TALLER_ACEPTO,
+    )
+    dispatch_push_notification_service(db, notificacion)
+
+
+def _registrar_notificacion_recursos_asignados(
+    db: Session,
+    *,
+    incidente,
+    taller,
+    tecnico,
+    unidad_movil,
+    tiempo_estimado_min: int | None,
+) -> None:
+    cliente = get_cliente_by_id(db, incidente.id_cliente)
+    if not cliente:
+        return
+
+    nombre_tecnico = (
+        f"{tecnico.usuario.nombres} {tecnico.usuario.apellidos}".strip()
+        if getattr(tecnico, "usuario", None)
+        else f"Tecnico #{tecnico.id_tecnico}"
+    )
+    descripcion_vehiculo = unidad_movil.placa if unidad_movil else "unidad movil asignada"
+    detalle_tiempo = (
+        f" Tiempo estimado de llegada: {tiempo_estimado_min} min."
+        if tiempo_estimado_min
+        else ""
+    )
+
+    notificacion = create_notificacion(
+        db,
+        id_usuario=cliente.id_usuario,
+        id_incidente=incidente.id_incidente,
+        titulo="Tecnico y unidad movil asignados",
+        mensaje=(
+            f"El taller '{taller.nombre_taller}' asigno a {nombre_tecnico} con "
+            f"{descripcion_vehiculo} para atender tu incidente '{incidente.titulo}'."
+            f"{detalle_tiempo}"
+        ),
+        tipo_notificacion=TIPO_NOTIFICACION_ASIGNACION_TECNICO,
+    )
+    dispatch_push_notification_service(db, notificacion)
 
 
 def _to_tecnico_disponible_asignacion_response(
@@ -328,6 +452,130 @@ def _to_evidencia_incidente_response(evidencia) -> EvidenciaIncidenteResponse:
     )
 
 
+def _resolve_texto_extraido_para_evidencia(tipo_evidencia: str, texto_extraido, descripcion) -> str | None:
+    evidence_type = tipo_evidencia.strip().upper()
+    extracted_text = texto_extraido.strip() if texto_extraido and texto_extraido.strip() else None
+    if extracted_text:
+        return extracted_text
+    if evidence_type in {"AUDIO", "AUDIO_TRANSCRITO"} and descripcion and descripcion.strip():
+        return descripcion.strip()
+    return None
+
+
+def _crear_evidencias_incidente(
+    db: Session,
+    *,
+    id_incidente: int,
+    evidencias_payload,
+) -> None:
+    for evidencia_payload in evidencias_payload:
+        create_evidencia(
+            db,
+            id_incidente=id_incidente,
+            tipo_evidencia=evidencia_payload.tipo_evidencia.strip().upper(),
+            archivo_url=evidencia_payload.archivo_url.strip(),
+            texto_extraido=_resolve_texto_extraido_para_evidencia(
+                evidencia_payload.tipo_evidencia,
+                evidencia_payload.texto_extraido,
+                evidencia_payload.descripcion,
+            ),
+            descripcion=(
+                evidencia_payload.descripcion.strip()
+                if evidencia_payload.descripcion and evidencia_payload.descripcion.strip()
+                else None
+            ),
+        )
+
+
+def _infer_evidencia_tipo_for_upload(file: UploadFile) -> str:
+    content_type = (file.content_type or "").strip().lower()
+    if content_type in ALLOWED_EVIDENCIA_UPLOAD_TYPES:
+        return ALLOWED_EVIDENCIA_UPLOAD_TYPES[content_type]
+
+    extension = Path(file.filename or "").suffix.strip().lower()
+    if extension in ALLOWED_EVIDENCIA_EXTENSIONS:
+        return ALLOWED_EVIDENCIA_EXTENSIONS[extension]
+
+    raise ValueError(
+        "Tipo de archivo no permitido. Solo se aceptan imagenes JPG/PNG/WEBP, videos MP4/MOV/AVI/WEBM/MPEG y audios MP3/WAV/M4A/AAC/OGG/WEBM."
+    )
+
+
+def _build_safe_upload_filename(original_filename: str | None) -> str:
+    original_extension = Path(original_filename or "").suffix.strip().lower()
+    extension = original_extension if original_extension in ALLOWED_EVIDENCIA_EXTENSIONS else ""
+    return f"{uuid4().hex}{extension}"
+
+
+def upload_evidencia_service(file: UploadFile, *, public_base_url: str) -> EvidenciaUploadResponse:
+    tipo_evidencia = _infer_evidencia_tipo_for_upload(file)
+    safe_name = _build_safe_upload_filename(file.filename)
+    target_directory = Path(settings.MEDIA_ROOT) / "evidencias" / tipo_evidencia.lower()
+    target_directory.mkdir(parents=True, exist_ok=True)
+    target_path = target_directory / safe_name
+
+    max_bytes = settings.MAX_EVIDENCIA_FILE_SIZE_MB * 1024 * 1024
+    file.file.seek(0)
+    content = file.file.read()
+    file.file.seek(0)
+
+    if not content:
+        raise ValueError("El archivo enviado esta vacio.")
+    if len(content) > max_bytes:
+        raise ValueError(
+            f"El archivo excede el tamano maximo permitido de {settings.MAX_EVIDENCIA_FILE_SIZE_MB} MB."
+        )
+
+    target_path.write_bytes(content)
+
+    normalized_base_url = public_base_url.rstrip("/")
+    relative_url = f"{settings.MEDIA_URL_PREFIX}/evidencias/{tipo_evidencia.lower()}/{safe_name}"
+    archivo_url = f"{normalized_base_url}{relative_url}"
+
+    return EvidenciaUploadResponse(
+        tipo_evidencia=tipo_evidencia,
+        archivo_url=archivo_url,
+        nombre_archivo=safe_name,
+        tamano_bytes=len(content),
+        content_type=file.content_type,
+    )
+
+
+def transcribir_audio_subido_service(*, archivo_url: str) -> AudioTranscriptionResponse:
+    transcript = transcribir_audio_desde_url_service(archivo_url.strip())
+    return AudioTranscriptionResponse(
+        archivo_url=archivo_url.strip(),
+        texto_extraido=transcript,
+        mensaje="Audio transcrito correctamente con Gemini.",
+    )
+
+
+def _to_incidente_disponible_response(solicitud_taller) -> IncidenteDisponibleResponse:
+    incidente = solicitud_taller.incidente
+    return IncidenteDisponibleResponse(
+        id_solicitud_taller=solicitud_taller.id_solicitud_taller,
+        id_incidente=incidente.id_incidente,
+        id_taller=solicitud_taller.id_taller,
+        titulo=incidente.titulo,
+        descripcion_texto=incidente.descripcion_texto,
+        direccion_referencia=incidente.direccion_referencia,
+        latitud=incidente.latitud,
+        longitud=incidente.longitud,
+        fecha_reporte=incidente.fecha_reporte,
+        fecha_envio=solicitud_taller.fecha_envio,
+        distancia_km=solicitud_taller.distancia_km,
+        puntaje_asignacion=solicitud_taller.puntaje_asignacion,
+        estado_solicitud=solicitud_taller.estado_solicitud,
+        id_vehiculo=incidente.id_vehiculo,
+        id_tipo_incidente=incidente.id_tipo_incidente,
+        tipo_incidente=incidente.tipo_incidente.nombre,
+        id_prioridad=incidente.id_prioridad,
+        prioridad=incidente.prioridad.nombre,
+        id_estado_servicio_actual=incidente.id_estado_servicio_actual,
+        estado_servicio_actual=incidente.estado_servicio_actual.nombre,
+    )
+
+
 def _to_incidente_asignado_list_response(
     asignacion_servicio,
 ) -> IncidenteAsignadoListResponse:
@@ -421,8 +669,20 @@ def report_incidente_service(
             longitud=payload.longitud,
         )
 
+        _crear_evidencias_incidente(
+            db,
+            id_incidente=incidente.id_incidente,
+            evidencias_payload=payload.evidencias,
+        )
+
         db.commit()
         db.refresh(incidente)
+        try:
+            orquestar_incidente_reportado_service(db, incidente.id_incidente)
+            db.refresh(incidente)
+        except Exception:
+            if not incidente.requiere_mas_info:
+                db.refresh(incidente)
 
         return IncidenteResponse.model_validate(incidente)
     except Exception:
@@ -447,13 +707,81 @@ def get_mis_incidentes_service(
     return [IncidenteResponse.model_validate(i) for i in incidentes]
 
 
+def completar_informacion_incidente_service(
+    db: Session,
+    current_user,
+    id_incidente: int,
+    payload: CompletarInformacionIncidenteRequest,
+) -> IncidenteResponse:
+    cliente = get_cliente_by_usuario_id(db, current_user.id_usuario)
+    if not cliente:
+        raise ValueError("El usuario autenticado no tiene perfil de cliente.")
+
+    if (
+        payload.descripcion_texto is None
+        and payload.direccion_referencia is None
+        and payload.latitud is None
+        and payload.longitud is None
+        and not payload.evidencias
+    ):
+        raise ValueError("Debe enviar al menos un dato adicional o una evidencia.")
+
+    incidente = get_incidente_by_id_for_update(db, id_incidente)
+    if not incidente or incidente.id_cliente != cliente.id_cliente:
+        raise ValueError("El incidente no existe o no pertenece al cliente autenticado.")
+
+    if not incidente.requiere_mas_info:
+        raise ValueError("El incidente no requiere informacion adicional en este momento.")
+
+    if payload.descripcion_texto and payload.descripcion_texto.strip():
+        descripcion_extra = payload.descripcion_texto.strip()
+        if incidente.descripcion_texto and incidente.descripcion_texto.strip():
+            incidente.descripcion_texto = (
+                f"{incidente.descripcion_texto.strip()}\n\nInformacion adicional: {descripcion_extra}"
+            )
+        else:
+            incidente.descripcion_texto = descripcion_extra
+
+    if payload.direccion_referencia is not None:
+        incidente.direccion_referencia = (
+            payload.direccion_referencia.strip()
+            if payload.direccion_referencia and payload.direccion_referencia.strip()
+            else None
+        )
+
+    if payload.latitud is not None:
+        incidente.latitud = payload.latitud
+    if payload.longitud is not None:
+        incidente.longitud = payload.longitud
+
+    try:
+        _crear_evidencias_incidente(
+            db,
+            id_incidente=incidente.id_incidente,
+            evidencias_payload=payload.evidencias,
+        )
+        db.commit()
+        db.refresh(incidente)
+
+        try:
+            orquestar_incidente_reportado_service(db, incidente.id_incidente)
+            db.refresh(incidente)
+        except Exception:
+            db.refresh(incidente)
+
+        return IncidenteResponse.model_validate(incidente)
+    except Exception:
+        db.rollback()
+        raise
+
+
 
 def get_incidentes_disponibles_service(
     db: Session,
     current_user,
 ) -> list[IncidenteDisponibleResponse]:
     taller = _get_taller_actor_service(db, current_user)
-    solicitudes = get_solicitudes_taller_disponibles(db, taller.id_taller)
+    solicitudes = get_incidentes_disponibles_by_taller_id(db, taller.id_taller)
     return [_to_incidente_disponible_response(solicitud) for solicitud in solicitudes]
 
 
@@ -506,6 +834,16 @@ def responder_solicitud_atencion_service(
                 db,
                 incidente,
                 id_estado_servicio_actual=estado_asignado.id_estado_servicio,
+            )
+            cancel_pending_solicitudes_by_incidente_except(
+                db,
+                id_incidente=solicitud_taller.id_incidente,
+                exclude_id_solicitud_taller=solicitud_taller.id_solicitud_taller,
+            )
+            _registrar_notificacion_taller_acepto(
+                db,
+                incidente=incidente,
+                taller=taller,
             )
         else:
             update_solicitud_taller_respuesta(
@@ -626,6 +964,17 @@ def asignar_tecnico_unidad_incidente_service(
             incidente,
             id_estado_servicio_actual=estado_asignado.id_estado_servicio,
         )
+        tecnico_detalle = get_tecnico_with_usuario_by_id(db, payload.id_tecnico)
+        unidad_movil_detalle = get_unidad_movil_by_id(db, payload.id_unidad_movil)
+        if tecnico_detalle and unidad_movil_detalle:
+            _registrar_notificacion_recursos_asignados(
+                db,
+                incidente=incidente,
+                taller=taller,
+                tecnico=tecnico_detalle,
+                unidad_movil=unidad_movil_detalle,
+                tiempo_estimado_min=payload.tiempo_estimado_min,
+            )
 
         db.commit()
         incidente_actualizado = get_incidente_by_id(db, id_incidente)

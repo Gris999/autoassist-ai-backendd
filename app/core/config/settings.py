@@ -39,6 +39,9 @@ class Settings(BaseSettings):
     FIREBASE_PROJECT_ID: str | None = None
     FIREBASE_SERVICE_ACCOUNT_FILE: str | None = None
     FIREBASE_SERVICE_ACCOUNT_JSON: str | None = None
+    MEDIA_ROOT: str = "media"
+    MEDIA_URL_PREFIX: str = "/media"
+    MAX_EVIDENCIA_FILE_SIZE_MB: int = 15
 
     model_config = SettingsConfigDict(
         env_file=".env",

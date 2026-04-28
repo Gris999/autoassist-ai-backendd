@@ -34,6 +34,7 @@ from app.modules.gestion_operativa_taller_tecnico.repository import (
     get_tecnico_by_usuario_id,
     get_tecnico_especialidades_by_tecnico_id,
     get_talleres_disponibles,
+    list_tipos_auxilio_disponibles,
     get_tipos_vehiculo_by_ids,
     get_tipos_vehiculo_disponibles,
     get_tipo_auxilio_by_id,
@@ -63,6 +64,7 @@ from app.modules.gestion_operativa_taller_tecnico.schemas import (
     TecnicoUpdateRequest,
     TallerTiposVehiculoConfigRequest,
     TallerTiposVehiculoConfigResponse,
+    TipoAuxilioCatalogResponse,
     TallerAuxilioCreateRequest,
     TallerAuxilioResponse,
     TallerAuxilioUpdateRequest,
@@ -225,6 +227,16 @@ def _to_tipo_vehiculo_response(tipo_vehiculo) -> TipoVehiculoResponse:
         id_tipo_vehiculo=tipo_vehiculo.id_tipo_vehiculo,
         nombre=tipo_vehiculo.nombre,
         descripcion=tipo_vehiculo.descripcion,
+    )
+
+
+def _to_tipo_auxilio_catalog_response(tipo_auxilio) -> TipoAuxilioCatalogResponse:
+    return TipoAuxilioCatalogResponse(
+        id_tipo_auxilio=tipo_auxilio.id_tipo_auxilio,
+        nombre=tipo_auxilio.nombre,
+        descripcion=tipo_auxilio.descripcion,
+        requiere_unidad_movil=tipo_auxilio.requiere_unidad_movil,
+        requiere_remolque=tipo_auxilio.requiere_remolque,
     )
 
 
@@ -661,6 +673,15 @@ def listar_tipos_vehiculo_disponibles_service(
     _get_taller_gestor_service(db, current_user)
     tipos_vehiculo = get_tipos_vehiculo_disponibles(db)
     return [_to_tipo_vehiculo_response(tipo_vehiculo) for tipo_vehiculo in tipos_vehiculo]
+
+
+def listar_tipos_auxilio_disponibles_service(
+    db: Session,
+    current_user,
+) -> list[TipoAuxilioCatalogResponse]:
+    _get_taller_gestor_service(db, current_user)
+    tipos_auxilio = list_tipos_auxilio_disponibles(db)
+    return [_to_tipo_auxilio_catalog_response(tipo_auxilio) for tipo_auxilio in tipos_auxilio]
 
 
 def obtener_configuracion_tipos_vehiculo_taller_service(

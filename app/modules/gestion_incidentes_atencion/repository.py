@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session, joinedload
 from app.modules.gestion_clientes.models import Vehiculo
 from app.modules.gestion_incidentes_atencion.models import (
     AsignacionServicio,
+    Evidencia,
     EstadoServicio,
     HistorialIncidente,
     Incidente,
@@ -98,6 +99,28 @@ def create_incidente(
     return incidente
 
 
+def create_evidencia(
+    db: Session,
+    *,
+    id_incidente: int,
+    tipo_evidencia: str,
+    archivo_url: str,
+    texto_extraido: str | None,
+    descripcion: str | None,
+) -> Evidencia:
+    evidencia = Evidencia(
+        id_incidente=id_incidente,
+        tipo_evidencia=tipo_evidencia,
+        archivo_url=archivo_url,
+        texto_extraido=texto_extraido,
+        descripcion=descripcion,
+    )
+    db.add(evidencia)
+    db.flush()
+    db.refresh(evidencia)
+    return evidencia
+
+
 def get_incidentes_by_cliente_id(db: Session, id_cliente: int) -> list[Incidente]:
     return db.execute(
         select(Incidente).where(Incidente.id_cliente == id_cliente)
@@ -139,6 +162,13 @@ def get_solicitudes_taller_disponibles(db: Session, id_taller: int) -> list[Soli
     ).scalars().all()
 
 
+def get_incidentes_disponibles_by_taller_id(
+    db: Session,
+    id_taller: int,
+) -> list[SolicitudTaller]:
+    return get_solicitudes_taller_disponibles(db, id_taller)
+
+
 def get_incidente_by_id(db: Session, id_incidente: int) -> Incidente | None:
     return db.execute(
         select(Incidente)
@@ -154,11 +184,6 @@ def get_incidente_by_id(db: Session, id_incidente: int) -> Incidente | None:
 def get_incidente_by_id_for_update(db: Session, id_incidente: int) -> Incidente | None:
     return db.execute(
         select(Incidente)
-        .options(
-            joinedload(Incidente.tipo_incidente),
-            joinedload(Incidente.prioridad),
-            joinedload(Incidente.estado_servicio_actual),
-        )
         .where(Incidente.id_incidente == id_incidente)
         .with_for_update()
     ).scalar_one_or_none()
@@ -182,11 +207,6 @@ def get_solicitud_taller_by_id_for_update(
 ) -> SolicitudTaller | None:
     return db.execute(
         select(SolicitudTaller)
-        .options(
-            joinedload(SolicitudTaller.incidente).joinedload(Incidente.tipo_incidente),
-            joinedload(SolicitudTaller.incidente).joinedload(Incidente.prioridad),
-            joinedload(SolicitudTaller.incidente).joinedload(Incidente.estado_servicio_actual),
-        )
         .where(SolicitudTaller.id_solicitud_taller == id_solicitud_taller)
         .with_for_update()
     ).scalar_one_or_none()
@@ -313,7 +333,6 @@ def get_unidades_moviles_disponibles_by_taller_id(db: Session, id_taller: int) -
 def get_tecnico_by_id_for_update(db: Session, id_tecnico: int) -> Tecnico | None:
     return db.execute(
         select(Tecnico)
-        .options(joinedload(Tecnico.usuario))
         .where(Tecnico.id_tecnico == id_tecnico)
         .with_for_update()
     ).scalar_one_or_none()
@@ -338,6 +357,29 @@ def update_solicitud_taller_respuesta(
     db.flush()
     db.refresh(solicitud_taller)
     return solicitud_taller
+
+
+def cancel_pending_solicitudes_by_incidente_except(
+    db: Session,
+    *,
+    id_incidente: int,
+    exclude_id_solicitud_taller: int,
+) -> list[SolicitudTaller]:
+    solicitudes = list(
+        db.execute(
+            select(SolicitudTaller)
+            .where(
+                SolicitudTaller.id_incidente == id_incidente,
+                SolicitudTaller.id_solicitud_taller != exclude_id_solicitud_taller,
+                SolicitudTaller.estado_solicitud == "PENDIENTE",
+            )
+        ).scalars()
+    )
+    for solicitud in solicitudes:
+        solicitud.estado_solicitud = "CANCELADA"
+        solicitud.fecha_respuesta = datetime.utcnow()
+    db.flush()
+    return solicitudes
 
 
 def update_incidente_estado_servicio_actual(

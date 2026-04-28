@@ -21,6 +21,7 @@ from app.modules.gestion_operativa_taller_tecnico.schemas import (
     TallerTiposVehiculoConfigRequest,
     TallerTiposVehiculoConfigResponse,
     TallerAuxilioCreateRequest,
+    TipoAuxilioCatalogResponse,
     TallerAuxilioResponse,
     TallerAuxilioUpdateRequest,
     TallerInfoResponse,
@@ -44,6 +45,7 @@ from app.modules.gestion_operativa_taller_tecnico.service import (
     habilitar_tecnico_service,
     asignar_especialidades_tecnico_service,
     listar_servicios_auxilio_service,
+    listar_tipos_auxilio_disponibles_service,
     listar_especialidades_disponibles_service,
     listar_especialidades_tecnico_service,
     listar_tecnicos_service,
@@ -523,6 +525,24 @@ def actualizar_disponibilidad_tecnico(
 ):
     try:
         return actualizar_disponibilidad_tecnico_service(db, current_user, payload)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
+
+@router.get(
+    "/tipos-auxilio",
+    response_model=list[TipoAuxilioCatalogResponse],
+    status_code=status.HTTP_200_OK,
+)
+def listar_tipos_auxilio_disponibles(
+    current_user: Usuario = Depends(require_roles("TALLER")),
+    db: Session = Depends(get_db),
+):
+    try:
+        return listar_tipos_auxilio_disponibles_service(db, current_user)
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

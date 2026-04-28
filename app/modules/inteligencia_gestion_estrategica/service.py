@@ -1,8 +1,13 @@
 import json
 import unicodedata
 from collections import Counter
+from base64 import b64encode
+from datetime import datetime
 from decimal import Decimal
 from math import asin, cos, radians, sin, sqrt
+from pathlib import Path
+from urllib.parse import urlparse
+from zoneinfo import ZoneInfo
 
 import httpx
 from sqlalchemy.orm import Session
@@ -26,6 +31,7 @@ from app.modules.inteligencia_gestion_estrategica.repository import (
     get_comision_plataforma_by_id,
     get_evidencia_by_id_and_incidente_id,
     get_evidencia_textos_by_incidente_id,
+    get_estado_servicio_by_nombre,
     get_incidente_by_id,
     get_incidente_metrics_context_by_id,
     get_incidente_with_assignment_context,
@@ -34,6 +40,7 @@ from app.modules.inteligencia_gestion_estrategica.repository import (
     get_prioridad_by_nombre,
     get_pending_notification_by_incidente_usuario_tipo,
     get_solicitud_taller_by_incidente_and_taller,
+    get_tipo_incidente_by_nombre,
     get_usuario_by_id,
     get_pago_servicio_with_comision_by_id,
     list_comisiones_plataforma,
@@ -42,6 +49,7 @@ from app.modules.inteligencia_gestion_estrategica.repository import (
     list_available_talleres_with_resources,
     list_evidences_by_incidente_id,
     upsert_metrica_incidente,
+    update_evidencia_texto_extraido,
     update_solicitud_taller_candidate_data,
     update_incidente_analysis_result,
 )
@@ -72,8 +80,53 @@ from app.modules.seguimiento_monitoreo_servicio.service import (
 )
 
 
+INCIDENTE_BATERIA = "bateria"
+INCIDENTE_LLANTA = "llanta"
+INCIDENTE_CHOQUE = "choque"
+INCIDENTE_MOTOR = "motor"
+INCIDENTE_COMBUSTIBLE = "combustible"
+INCIDENTE_LLAVE = "llave"
+INCIDENTE_INCIERTO = "incierto"
+
+AUXILIO_REMOLQUE = "REMOLQUE"
+AUXILIO_ELECTRICO = "AUXILIO_ELECTRICO"
+AUXILIO_LLANTA = "CAMBIO_DE_LLANTA"
+AUXILIO_COMBUSTIBLE = "SUMINISTRO_COMBUSTIBLE"
+AUXILIO_APERTURA = "APERTURA_VEHICULO"
+AUXILIO_MECANICO = "AUXILIO_MECANICO_BASICO"
+
+NORMALIZED_CLASSIFICATION_MAP: dict[str, str] = {
+    INCIDENTE_BATERIA: INCIDENTE_BATERIA,
+    "electrico": INCIDENTE_BATERIA,
+    INCIDENTE_LLANTA: INCIDENTE_LLANTA,
+    INCIDENTE_CHOQUE: INCIDENTE_CHOQUE,
+    INCIDENTE_MOTOR: INCIDENTE_MOTOR,
+    INCIDENTE_COMBUSTIBLE: INCIDENTE_COMBUSTIBLE,
+    INCIDENTE_LLAVE: INCIDENTE_LLAVE,
+    INCIDENTE_INCIERTO: INCIDENTE_INCIERTO,
+    AUXILIO_ELECTRICO.lower(): INCIDENTE_BATERIA,
+    AUXILIO_LLANTA.lower(): INCIDENTE_LLANTA,
+    AUXILIO_REMOLQUE.lower(): INCIDENTE_CHOQUE,
+    AUXILIO_MECANICO.lower(): INCIDENTE_MOTOR,
+    AUXILIO_COMBUSTIBLE.lower(): INCIDENTE_COMBUSTIBLE,
+    AUXILIO_APERTURA.lower(): INCIDENTE_LLAVE,
+    "apertura_vehiculo": INCIDENTE_LLAVE,
+    "auxilio_mecanico_basico": INCIDENTE_MOTOR,
+    "suministro_combustible": INCIDENTE_COMBUSTIBLE,
+    "cambio_de_llanta": INCIDENTE_LLANTA,
+}
+
+CATEGORY_TO_AUXILIO: dict[str, str] = {
+    INCIDENTE_BATERIA: AUXILIO_ELECTRICO,
+    INCIDENTE_LLANTA: AUXILIO_LLANTA,
+    INCIDENTE_CHOQUE: AUXILIO_REMOLQUE,
+    INCIDENTE_MOTOR: AUXILIO_MECANICO,
+    INCIDENTE_COMBUSTIBLE: AUXILIO_COMBUSTIBLE,
+    INCIDENTE_LLAVE: AUXILIO_APERTURA,
+}
+
 KEYWORDS_BY_CATEGORY: dict[str, tuple[str, ...]] = {
-    "bateria": (
+    INCIDENTE_BATERIA: (
         "no enciende",
         "no arranca",
         "bateria",
@@ -83,7 +136,7 @@ KEYWORDS_BY_CATEGORY: dict[str, tuple[str, ...]] = {
         "luces",
         "chispa",
     ),
-    "llanta": (
+    INCIDENTE_LLANTA: (
         "llanta",
         "pinchazo",
         "pinchada",
@@ -92,7 +145,7 @@ KEYWORDS_BY_CATEGORY: dict[str, tuple[str, ...]] = {
         "desinflada",
         "revento",
     ),
-    "choque": (
+    INCIDENTE_CHOQUE: (
         "choque",
         "colision",
         "accidente",
@@ -101,7 +154,7 @@ KEYWORDS_BY_CATEGORY: dict[str, tuple[str, ...]] = {
         "abollado",
         "parachoques",
     ),
-    "motor": (
+    INCIDENTE_MOTOR: (
         "motor",
         "humo",
         "sobrecalentamiento",
@@ -111,14 +164,14 @@ KEYWORDS_BY_CATEGORY: dict[str, tuple[str, ...]] = {
         "ruido extrano",
         "falla mecanica",
     ),
-    "combustible": (
+    INCIDENTE_COMBUSTIBLE: (
         "gasolina",
         "combustible",
         "sin gasolina",
         "sin combustible",
         "tanque vacio",
     ),
-    "llave": (
+    INCIDENTE_LLAVE: (
         "llave",
         "perdi la llave",
         "llave dentro",
@@ -128,48 +181,57 @@ KEYWORDS_BY_CATEGORY: dict[str, tuple[str, ...]] = {
 }
 
 PRIORITY_BY_CATEGORY: dict[str, str] = {
-    "choque": "alta",
-    "motor": "alta",
-    "bateria": "media",
-    "llanta": "media",
-    "combustible": "media",
-    "llave": "baja",
-    "incierto": "baja",
+    INCIDENTE_CHOQUE: "alta",
+    INCIDENTE_MOTOR: "alta",
+    INCIDENTE_BATERIA: "media",
+    INCIDENTE_LLANTA: "media",
+    INCIDENTE_COMBUSTIBLE: "media",
+    INCIDENTE_LLAVE: "baja",
+    INCIDENTE_INCIERTO: "baja",
+}
+
+INCIDENT_TYPE_BY_CATEGORY: dict[str, str] = {
+    INCIDENTE_BATERIA: "BATERIA_DESCARGADA",
+    INCIDENTE_LLANTA: "PINCHAZO_LLANTA",
+    INCIDENTE_CHOQUE: "ACCIDENTE_MENOR",
+    INCIDENTE_MOTOR: "FALLA_MECANICA",
+    INCIDENTE_COMBUSTIBLE: "SIN_COMBUSTIBLE",
+    INCIDENTE_LLAVE: "LLAVES_DENTRO",
 }
 
 QUESTIONS_BY_CATEGORY: dict[str, list[str]] = {
-    "incierto": [
+    INCIDENTE_INCIERTO: [
         "\u00bfEl vehiculo enciende?",
         "\u00bfTiene alguna llanta danada?",
         "\u00bfHay humo, fuga o golpe visible?",
         "\u00bfPuede enviar una foto del problema?",
     ],
-    "bateria": [
+    INCIDENTE_BATERIA: [
         "\u00bfEl vehiculo intenta arrancar o no hace ningun sonido?",
         "\u00bfSe encienden las luces del tablero?",
         "\u00bfHace cuanto tiempo se cambio la bateria?",
     ],
-    "llanta": [
+    INCIDENTE_LLANTA: [
         "\u00bfLa llanta esta desinflada o reventada?",
         "\u00bfTiene llanta de auxilio?",
         "\u00bfEsta en carretera o dentro de la ciudad?",
     ],
-    "choque": [
+    INCIDENTE_CHOQUE: [
         "\u00bfHay personas heridas?",
         "\u00bfEl vehiculo puede moverse?",
         "\u00bfEl dano es frontal, lateral o trasero?",
     ],
-    "motor": [
+    INCIDENTE_MOTOR: [
         "\u00bfSale humo del motor?",
         "\u00bfLa temperatura esta elevada?",
         "\u00bfEscucha algun ruido extrano?",
     ],
-    "combustible": [
+    INCIDENTE_COMBUSTIBLE: [
         "\u00bfEl indicador marca reserva o vacio?",
         "\u00bfEl vehiculo se detuvo por falta de combustible?",
         "\u00bfSe encuentra en una zona segura para recibir auxilio?",
     ],
-    "llave": [
+    INCIDENTE_LLAVE: [
         "\u00bfLa llave quedo dentro del vehiculo o se perdio?",
         "\u00bfCuenta con llave de repuesto?",
         "\u00bfLa cerradura responde o esta bloqueada?",
@@ -182,23 +244,31 @@ ALLOWED_EVIDENCE_TYPES = {
     "IMAGEN_ANALIZADA",
 }
 
-CLASSIFICATION_SERVICE_KEYWORDS = {
-    "bateria": ("bateria", "electrico", "corriente"),
-    "llanta": ("llanta", "rueda", "neumatico", "pinchazo"),
-    "choque": ("remolque", "grua", "choque", "accidente"),
-    "motor": ("mecanica", "motor", "remolque", "grua"),
-    "combustible": ("combustible", "gasolina"),
-    "llave": ("llave", "cerrajeria", "apertura"),
-}
-
-ALLOWED_INCIDENT_CATEGORIES = tuple(KEYWORDS_BY_CATEGORY.keys()) + ("incierto",)
+ALLOWED_INCIDENT_CATEGORIES = tuple(KEYWORDS_BY_CATEGORY.keys()) + (INCIDENTE_INCIERTO,)
 ALLOWED_PRIORITIES = ("baja", "media", "alta", "critica")
 
-ESTADOS_SOLICITUD_EXCLUIDOS = {"RECHAZADA"}
-ESTADOS_INCIDENTE_NO_APTOS_PARA_ASIGNACION = {"FINALIZADO", "CANCELADO"}
+ESTADOS_SOLICITUD_EXCLUIDOS = {"RECHAZADA", "CANCELADA"}
+ESTADOS_INCIDENTE_NO_APTOS_PARA_ASIGNACION = {
+    "ASIGNADO",
+    "EN_CAMINO",
+    "EN_ATENCION",
+    "FINALIZADO",
+    "CANCELADO",
+}
 ESTADO_SOLICITUD_INTELIGENTE = "PENDIENTE"
+ESTADO_INCIDENTE_BUSCANDO_TALLER = "BUSCANDO_TALLER"
 ROBOFLOW_IMAGE_EVIDENCE_TYPES = {"IMAGEN", "FOTO", "IMAGE"}
 ROBOFLOW_SUPPORTED_TASK_TYPES = {"classification", "object-detection"}
+AUDIO_EVIDENCE_TYPES = {"AUDIO", "AUDIO_TRANSCRITO", "VOICE", "MP3", "WAV", "M4A", "OGG"}
+AUDIO_MIME_TYPES_BY_EXTENSION = {
+    ".mp3": "audio/mpeg",
+    ".wav": "audio/wav",
+    ".m4a": "audio/mp4",
+    ".ogg": "audio/ogg",
+    ".aac": "audio/aac",
+    ".flac": "audio/flac",
+}
+AUTOASSIST_LOCAL_TZ = ZoneInfo("America/La_Paz")
 
 
 class IncidentNotFoundError(LookupError):
@@ -284,7 +354,7 @@ def _extract_image_label_category(raw_label: str) -> str:
         return "combustible"
     if any(keyword in normalized_label for keyword in ("key", "llave", "lock", "cerradura", "door")):
         return "llave"
-    return "incierto"
+    return INCIDENTE_INCIERTO
 
 
 def _summarize_roboflow_predictions(
@@ -307,7 +377,7 @@ def _summarize_roboflow_predictions(
                 normalized_predictions.append((str(label).strip(), confidence))
 
         normalized_predictions.sort(key=lambda item: item[1], reverse=True)
-        top_label = str(payload.get("top") or (normalized_predictions[0][0] if normalized_predictions else "incierto"))
+        top_label = str(payload.get("top") or (normalized_predictions[0][0] if normalized_predictions else INCIDENTE_INCIERTO))
         top_confidence = float(payload.get("confidence") or (normalized_predictions[0][1] if normalized_predictions else 0.0))
         detections = [
             f"{label} ({confidence:.2f})"
@@ -324,7 +394,7 @@ def _summarize_roboflow_predictions(
             normalized_predictions.append((label, confidence))
 
     normalized_predictions.sort(key=lambda item: item[1], reverse=True)
-    top_label = normalized_predictions[0][0] if normalized_predictions else "incierto"
+    top_label = normalized_predictions[0][0] if normalized_predictions else INCIDENTE_INCIERTO
     top_confidence = normalized_predictions[0][1] if normalized_predictions else 0.0
     detections = [
         f"{label} ({confidence:.2f})"
@@ -430,7 +500,7 @@ def _classify_incident(
 
     max_score = max(scores.values(), default=0)
     if max_score == 0:
-        return "incierto", 0.0, matches_by_category, text_parts
+        return INCIDENTE_INCIERTO, 0.0, matches_by_category, text_parts
 
     top_categories = [
         category
@@ -438,7 +508,7 @@ def _classify_incident(
         if score == max_score
     ]
     if len(top_categories) > 1:
-        return "incierto", 0.25, matches_by_category, text_parts
+        return INCIDENTE_INCIERTO, 0.25, matches_by_category, text_parts
 
     category = top_categories[0]
     total_hits = sum(scores.values())
@@ -464,7 +534,7 @@ def _requires_more_information(
     confidence: float,
     text_parts: list[str],
 ) -> bool:
-    if category == "incierto":
+    if category == INCIDENTE_INCIERTO:
         return True
     if confidence < 0.55:
         return True
@@ -510,9 +580,10 @@ def _build_summary(
 
 def _normalize_llm_category(value: str | None) -> str:
     normalized = _normalize_text((value or "").strip())
+    normalized = NORMALIZED_CLASSIFICATION_MAP.get(normalized, normalized)
     if normalized in ALLOWED_INCIDENT_CATEGORIES:
         return normalized
-    return "incierto"
+    return INCIDENTE_INCIERTO
 
 
 def _normalize_llm_priority(value: str | None) -> str:
@@ -748,6 +819,7 @@ def _run_gemini_incident_analysis(
 
     return AnalisisIncidenteLLMResult(
         clasificacion_ia=normalized_category,
+        auxilio_sugerido=_resolve_auxilio_name_for_classification(normalized_category),
         confianza_clasificacion=confidence,
         prioridad=normalized_priority,
         resumen_ia=parsed_result.resumen_ia.strip(),
@@ -872,6 +944,7 @@ def _run_openai_incident_analysis(
 
     return AnalisisIncidenteLLMResult(
         clasificacion_ia=normalized_category,
+        auxilio_sugerido=_resolve_auxilio_name_for_classification(normalized_category),
         confianza_clasificacion=confidence,
         prioridad=normalized_priority,
         resumen_ia=parsed_result.resumen_ia.strip(),
@@ -961,6 +1034,7 @@ def _run_openrouter_incident_analysis(
 
     return AnalisisIncidenteLLMResult(
         clasificacion_ia=normalized_category,
+        auxilio_sugerido=_resolve_auxilio_name_for_classification(normalized_category),
         confianza_clasificacion=confidence,
         prioridad=normalized_priority,
         resumen_ia=parsed_result.resumen_ia.strip(),
@@ -972,13 +1046,13 @@ def _run_openrouter_incident_analysis(
 def _suggest_questions(category: str, requires_more_info: bool) -> list[str]:
     if not requires_more_info:
         return []
-    return QUESTIONS_BY_CATEGORY.get(category, QUESTIONS_BY_CATEGORY["incierto"])
+    return QUESTIONS_BY_CATEGORY.get(category, QUESTIONS_BY_CATEGORY[INCIDENTE_INCIERTO])
 
 
 def _get_questions_for_incident_classification(clasificacion_ia: str | None) -> list[str]:
-    normalized_category = (clasificacion_ia or "").strip().lower()
+    normalized_category = _normalize_llm_category(clasificacion_ia)
     if not normalized_category or normalized_category not in QUESTIONS_BY_CATEGORY:
-        normalized_category = "incierto"
+        normalized_category = INCIDENTE_INCIERTO
     return QUESTIONS_BY_CATEGORY[normalized_category]
 
 
@@ -986,6 +1060,92 @@ def _serialize_archivo_url(archivo_url: str | None) -> str | None:
     if not archivo_url:
         return None
     return archivo_url
+
+
+def _is_audio_evidence(evidencia) -> bool:
+    return (evidencia.tipo_evidencia or "").strip().upper() in AUDIO_EVIDENCE_TYPES
+
+
+def _infer_audio_mime_type(archivo_url: str) -> str:
+    path = urlparse(archivo_url).path.lower()
+    for extension, mime_type in AUDIO_MIME_TYPES_BY_EXTENSION.items():
+        if path.endswith(extension):
+            return mime_type
+    return "audio/mpeg"
+
+
+def _read_local_media_file_bytes(archivo_url: str) -> bytes | None:
+    parsed = urlparse(archivo_url)
+    media_prefix = settings.MEDIA_URL_PREFIX.rstrip("/")
+    if not parsed.path.startswith(f"{media_prefix}/"):
+        return None
+
+    relative_media_path = parsed.path.removeprefix(f"{media_prefix}/").lstrip("/")
+    target_path = Path(settings.MEDIA_ROOT) / relative_media_path
+    if not target_path.exists() or not target_path.is_file():
+        return None
+    return target_path.read_bytes()
+
+
+def _extract_text_from_gemini_response(payload: dict) -> str:
+    candidates = payload.get("candidates") or []
+    for candidate in candidates:
+        content = candidate.get("content") or {}
+        for part in content.get("parts") or []:
+            text = (part.get("text") or "").strip()
+            if text:
+                return text
+    return ""
+
+
+def _run_gemini_audio_transcription(*, archivo_url: str) -> str:
+    if not settings.GEMINI_API_KEY:
+        raise ValueError("GEMINI_API_KEY no configurada.")
+
+    mime_type = _infer_audio_mime_type(archivo_url)
+    local_audio_bytes = _read_local_media_file_bytes(archivo_url)
+    if local_audio_bytes is not None:
+        audio_bytes = local_audio_bytes
+    else:
+        audio_response = httpx.get(archivo_url, timeout=settings.GEMINI_TIMEOUT_SECONDS)
+        audio_response.raise_for_status()
+        audio_bytes = audio_response.content
+
+    inline_audio = b64encode(audio_bytes).decode("ascii")
+
+    response = httpx.post(
+        f"https://generativelanguage.googleapis.com/v1beta/models/{settings.GEMINI_MODEL}:generateContent",
+        headers={
+            "x-goog-api-key": settings.GEMINI_API_KEY,
+            "Content-Type": "application/json",
+        },
+        json={
+            "contents": [
+                {
+                    "parts": [
+                        {
+                            "text": (
+                                "Transcribe el audio del incidente vehicular de forma literal y breve. "
+                                "Devuelve solo la transcripcion en texto plano, sin markdown ni etiquetas."
+                            )
+                        },
+                        {
+                            "inline_data": {
+                                "mime_type": mime_type,
+                                "data": inline_audio,
+                            }
+                        },
+                    ]
+                }
+            ]
+        },
+        timeout=settings.GEMINI_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+    transcript = _extract_text_from_gemini_response(response.json()).strip()
+    if not transcript:
+        raise ValueError("Gemini no devolvio una transcripcion util para el audio.")
+    return transcript
 
 
 def _to_evidencia_procesada_response(
@@ -1048,13 +1208,26 @@ def _normalize_service_name(value: str | None) -> str:
     return _normalize_text(value)
 
 
-def _get_service_keywords_for_classification(clasificacion_ia: str) -> tuple[str, ...]:
-    normalized_category = clasificacion_ia.strip().lower()
-    if normalized_category not in CLASSIFICATION_SERVICE_KEYWORDS:
-        raise IncidentClassificationInsufficientError(
-            "La clasificacion del incidente no es suficiente para asignar taller."
-        )
-    return CLASSIFICATION_SERVICE_KEYWORDS[normalized_category]
+def _resolve_auxilio_name_for_classification(clasificacion_ia: str | None) -> str | None:
+    normalized_category = _normalize_llm_category(clasificacion_ia)
+    return CATEGORY_TO_AUXILIO.get(normalized_category)
+
+
+def _resolve_auxilio_name_for_incidente(incidente) -> str | None:
+    if incidente.tipo_incidente and incidente.tipo_incidente.nombre:
+        tipo_incidente_nombre = incidente.tipo_incidente.nombre.strip().upper()
+        incident_type_to_auxilio = {
+            "BATERIA_DESCARGADA": AUXILIO_ELECTRICO,
+            "PINCHAZO_LLANTA": AUXILIO_LLANTA,
+            "SIN_COMBUSTIBLE": AUXILIO_COMBUSTIBLE,
+            "LLAVES_DENTRO": AUXILIO_APERTURA,
+            "FALLA_MECANICA": AUXILIO_MECANICO,
+            "ACCIDENTE_MENOR": AUXILIO_REMOLQUE,
+        }
+        auxilio = incident_type_to_auxilio.get(tipo_incidente_nombre)
+        if auxilio:
+            return auxilio
+    return _resolve_auxilio_name_for_classification(incidente.clasificacion_ia)
 
 
 def _haversine_distance_km(
@@ -1086,6 +1259,37 @@ def _calculate_distance_score(distance_km: float, coverage_km: float) -> float:
     return 0.0
 
 
+def _get_incident_datetime(incidente) -> datetime:
+    incident_dt = incidente.fecha_reporte or datetime.utcnow()
+    if incident_dt.tzinfo is None:
+        incident_dt = incident_dt.replace(tzinfo=ZoneInfo("UTC"))
+    return incident_dt.astimezone(AUTOASSIST_LOCAL_TZ)
+
+
+def _is_taller_schedule_compatible(taller, incidente) -> bool:
+    incident_dt = _get_incident_datetime(incidente)
+    day_mapping = {
+        "MONDAY": "LUNES",
+        "TUESDAY": "MARTES",
+        "WEDNESDAY": "MIERCOLES",
+        "THURSDAY": "JUEVES",
+        "FRIDAY": "VIERNES",
+        "SATURDAY": "SABADO",
+        "SUNDAY": "DOMINGO",
+    }
+    dia_semana = day_mapping.get(incident_dt.strftime("%A").upper(), "")
+    hora_incidente = incident_dt.time()
+
+    for horario in taller.horarios_disponibilidad:
+        if not horario.estado:
+            continue
+        if horario.dia_semana.strip().upper() != dia_semana:
+            continue
+        if horario.hora_inicio <= hora_incidente <= horario.hora_fin:
+            return True
+    return False
+
+
 def _has_available_tecnico(taller) -> bool:
     return any(tecnico.estado and tecnico.disponible for tecnico in taller.tecnicos)
 
@@ -1104,13 +1308,17 @@ def _is_vehicle_type_compatible(taller, id_tipo_vehiculo: int) -> bool:
     )
 
 
-def _get_feasible_auxilio_for_classification(
+def _get_feasible_auxilio_for_incidente(
     taller,
     *,
-    clasificacion_ia: str,
+    incidente,
     unidad_movil_disponible: bool,
 ):
-    keywords = _get_service_keywords_for_classification(clasificacion_ia)
+    expected_auxilio_name = _resolve_auxilio_name_for_incidente(incidente)
+    if not expected_auxilio_name:
+        raise IncidentClassificationInsufficientError(
+            "La clasificacion del incidente no es suficiente para resolver el auxilio requerido."
+        )
     compatible_services = []
     for taller_auxilio in taller.talleres_auxilio:
         tipo_auxilio = taller_auxilio.tipo_auxilio
@@ -1118,7 +1326,7 @@ def _get_feasible_auxilio_for_classification(
             continue
 
         service_name = _normalize_service_name(tipo_auxilio.nombre)
-        if any(keyword in service_name for keyword in keywords):
+        if service_name == _normalize_service_name(expected_auxilio_name):
             compatible_services.append(taller_auxilio)
 
     if not compatible_services:
@@ -1146,7 +1354,7 @@ def _validate_incidente_for_intelligent_assignment(incidente) -> None:
         raise IncidentDoesNotRequireMoreInformationError(
             "El incidente aun requiere mas informacion para asignar taller."
         )
-    if incidente.clasificacion_ia.strip().lower() == "incierto":
+    if _normalize_llm_category(incidente.clasificacion_ia) == INCIDENTE_INCIERTO:
         raise IncidentClassificationInsufficientError(
             "La clasificacion del incidente no es suficiente para asignar taller."
         )
@@ -1434,6 +1642,7 @@ def _run_rule_based_incident_analysis(
     return AnalisisIncidenteResponse(
         id_incidente=id_incidente,
         clasificacion_ia=category,
+        auxilio_sugerido=_resolve_auxilio_name_for_classification(category),
         confianza_clasificacion=confidence,
         prioridad=priority,
         resumen_ia=summary,
@@ -1498,6 +1707,7 @@ def _run_incident_analysis(
         return AnalisisIncidenteResponse(
             id_incidente=id_incidente,
             clasificacion_ia=llm_result.clasificacion_ia,
+            auxilio_sugerido=llm_result.auxilio_sugerido,
             confianza_clasificacion=llm_result.confianza_clasificacion,
             prioridad=llm_result.prioridad,
             resumen_ia=llm_result.resumen_ia,
@@ -1555,6 +1765,12 @@ def analizar_incidente_por_id_service(
             longitud=incidente.longitud,
         )
         prioridad = get_prioridad_by_nombre(db, analysis.prioridad)
+        tipo_incidente = None
+        if analysis.clasificacion_ia in INCIDENT_TYPE_BY_CATEGORY:
+            tipo_incidente = get_tipo_incidente_by_nombre(
+                db,
+                INCIDENT_TYPE_BY_CATEGORY[analysis.clasificacion_ia],
+            )
         update_incidente_analysis_result(
             db,
             incidente,
@@ -1563,6 +1779,9 @@ def analizar_incidente_por_id_service(
             resumen_ia=analysis.resumen_ia,
             requiere_mas_info=analysis.requiere_mas_info,
             id_prioridad=prioridad.id_prioridad if prioridad else None,
+            id_tipo_incidente=(
+                tipo_incidente.id_tipo_incidente if tipo_incidente else None
+            ),
         )
         db.commit()
         return analysis
@@ -1774,6 +1993,86 @@ def listar_evidencias_procesadas_incidente_service(
     ]
 
 
+def transcribir_evidencias_audio_incidente_service(
+    db: Session,
+    id_incidente: int,
+) -> list[EvidenciaProcesadaResponse]:
+    incidente = get_incidente_by_id(db, id_incidente)
+    if not incidente:
+        raise IncidentNotFoundError("Incidente no encontrado.")
+
+    evidencias = list_evidences_by_incidente_id(db, id_incidente)
+    actualizadas = []
+    try:
+        for evidencia in evidencias:
+            if not _is_audio_evidence(evidencia):
+                continue
+            if evidencia.texto_extraido and evidencia.texto_extraido.strip():
+                actualizadas.append(evidencia)
+                continue
+            transcript = _run_gemini_audio_transcription(
+                archivo_url=_serialize_archivo_url(evidencia.archivo_url) or ""
+            )
+            actualizadas.append(
+                update_evidencia_texto_extraido(
+                    db,
+                    evidencia,
+                    texto_extraido=transcript,
+                )
+            )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    return [
+        _to_evidencia_procesada_response(
+            evidencia,
+            mensaje="Audio transcrito automaticamente con Gemini.",
+        )
+        for evidencia in actualizadas
+    ]
+
+
+def transcribir_audio_desde_url_service(archivo_url: str) -> str:
+    normalized_url = _serialize_archivo_url(archivo_url)
+    if not normalized_url:
+        raise ValueError("archivo_url es obligatoria para transcribir el audio.")
+    return _run_gemini_audio_transcription(archivo_url=normalized_url)
+
+
+def orquestar_incidente_reportado_service(
+    db: Session,
+    id_incidente: int,
+) -> dict:
+    evidencias_audio = list_evidences_by_incidente_id(db, id_incidente)
+    if any(_is_audio_evidence(evidencia) for evidencia in evidencias_audio):
+        try:
+            transcribir_evidencias_audio_incidente_service(db, id_incidente)
+        except Exception:
+            if not settings.AI_USE_FALLBACK:
+                raise
+
+    analysis = analizar_incidente_por_id_service(db, id_incidente)
+    result = {
+        "analisis_ejecutado": True,
+        "requiere_mas_info": analysis.requiere_mas_info,
+        "clasificacion_ia": analysis.clasificacion_ia,
+        "solicitudes_generadas": 0,
+    }
+
+    if analysis.requiere_mas_info:
+        return result
+
+    try:
+        asignacion = asignar_taller_inteligentemente_service(db, id_incidente)
+        result["solicitudes_generadas"] = asignacion.total_candidatos
+        result["estado_orquestacion"] = "BUSCANDO_TALLER"
+    except NoCandidateTallerFoundError:
+        result["estado_orquestacion"] = "SIN_CANDIDATOS"
+    return result
+
+
 def asignar_taller_inteligentemente_service(
     db: Session,
     id_incidente: int,
@@ -1796,17 +2095,25 @@ def asignar_taller_inteligentemente_service(
         if taller.latitud is None or taller.longitud is None or taller.radio_cobertura_km is None:
             continue
 
+        taller_activo = bool(taller.usuario and taller.usuario.estado)
         taller_disponible = bool(taller.disponible)
         tecnico_disponible = _has_available_tecnico(taller)
         unidad_movil_disponible = _has_available_unidad_movil(taller)
         compatible_tipo_vehiculo = _is_vehicle_type_compatible(taller, vehicle_type_id)
+        horario_compatible = _is_taller_schedule_compatible(taller, incidente)
 
-        if not taller_disponible or not tecnico_disponible or not compatible_tipo_vehiculo:
+        if (
+            not taller_activo
+            or not taller_disponible
+            or not tecnico_disponible
+            or not compatible_tipo_vehiculo
+            or not horario_compatible
+        ):
             continue
 
-        auxilio_compatible = _get_feasible_auxilio_for_classification(
+        auxilio_compatible = _get_feasible_auxilio_for_incidente(
             taller,
-            clasificacion_ia=incidente.clasificacion_ia,
+            incidente=incidente,
             unidad_movil_disponible=unidad_movil_disponible,
         )
         if auxilio_compatible is None:
@@ -1954,6 +2261,13 @@ def asignar_taller_inteligentemente_service(
     )
 
     try:
+        estado_buscando_taller = get_estado_servicio_by_nombre(
+            db,
+            ESTADO_INCIDENTE_BUSCANDO_TALLER,
+        )
+        if estado_buscando_taller:
+            incidente.id_estado_servicio_actual = estado_buscando_taller.id_estado_servicio
+            db.flush()
         db.commit()
     except Exception:
         db.rollback()
@@ -1963,6 +2277,7 @@ def asignar_taller_inteligentemente_service(
     return AsignacionInteligenteResponse(
         id_incidente=incidente.id_incidente,
         clasificacion_ia=incidente.clasificacion_ia,
+        auxilio_sugerido=_resolve_auxilio_name_for_incidente(incidente),
         taller_recomendado=TallerRecomendadoResponse(
             id_taller=taller_recomendado.id_taller,
             nombre_taller=taller_recomendado.nombre_taller,
@@ -1972,7 +2287,7 @@ def asignar_taller_inteligentemente_service(
         ),
         candidatos=candidatos_registrados,
         total_candidatos=len(candidatos_registrados),
-        mensaje="Taller recomendado correctamente.",
+        mensaje="Talleres candidatos seleccionados correctamente.",
         fuente_evaluacion=fuente_evaluacion,
         modelo_evaluacion=modelo_evaluacion,
         fallback_usado=fallback_usado,

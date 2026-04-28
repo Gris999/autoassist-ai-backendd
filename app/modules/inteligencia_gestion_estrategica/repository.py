@@ -10,11 +10,14 @@ from app.modules.gestion_incidentes_atencion.models import (
     AsignacionServicio,
     Evidencia,
     HistorialIncidente,
+    EstadoServicio,
     Incidente,
     Prioridad,
     SolicitudTaller,
+    TipoIncidente,
 )
 from app.modules.gestion_operativa_taller_tecnico.models import (
+    HorarioDisponibilidadTaller,
     Taller,
     TallerAuxilio,
     TallerTipoVehiculo,
@@ -87,6 +90,7 @@ def update_incidente_analysis_result(
     resumen_ia: str,
     requiere_mas_info: bool,
     id_prioridad: int | None = None,
+    id_tipo_incidente: int | None = None,
 ) -> Incidente:
     incidente.clasificacion_ia = clasificacion_ia
     incidente.confianza_clasificacion = round(confianza_clasificacion, 2)
@@ -94,6 +98,8 @@ def update_incidente_analysis_result(
     incidente.requiere_mas_info = requiere_mas_info
     if id_prioridad is not None:
         incidente.id_prioridad = id_prioridad
+    if id_tipo_incidente is not None:
+        incidente.id_tipo_incidente = id_tipo_incidente
     db.flush()
     db.refresh(incidente)
     return incidente
@@ -102,6 +108,18 @@ def update_incidente_analysis_result(
 def get_prioridad_by_nombre(db: Session, nombre: str) -> Prioridad | None:
     return db.execute(
         select(Prioridad).where(Prioridad.nombre == nombre.upper())
+    ).scalar_one_or_none()
+
+
+def get_tipo_incidente_by_nombre(db: Session, nombre: str) -> TipoIncidente | None:
+    return db.execute(
+        select(TipoIncidente).where(TipoIncidente.nombre == nombre.upper())
+    ).scalar_one_or_none()
+
+
+def get_estado_servicio_by_nombre(db: Session, nombre: str) -> EstadoServicio | None:
+    return db.execute(
+        select(EstadoServicio).where(EstadoServicio.nombre == nombre.upper())
     ).scalar_one_or_none()
 
 
@@ -179,6 +197,18 @@ def create_processed_evidence(
     return evidence
 
 
+def update_evidencia_texto_extraido(
+    db: Session,
+    evidencia: Evidencia,
+    *,
+    texto_extraido: str,
+) -> Evidencia:
+    evidencia.texto_extraido = texto_extraido
+    db.flush()
+    db.refresh(evidencia)
+    return evidencia
+
+
 def list_evidences_by_incidente_id(db: Session, id_incidente: int) -> list[Evidencia]:
     return list(
         db.execute(
@@ -199,7 +229,7 @@ def get_incidente_with_assignment_context(db: Session, id_incidente: int) -> Inc
             joinedload(Incidente.solicitudes_taller),
         )
         .where(Incidente.id_incidente == id_incidente)
-    ).scalar_one_or_none()
+    ).unique().scalar_one_or_none()
 
 
 def list_incidentes_metrics_context(db: Session) -> list[Incidente]:
@@ -284,8 +314,10 @@ def list_available_talleres_with_resources(db: Session) -> list[Taller]:
         db.execute(
             select(Taller)
             .options(
+                joinedload(Taller.usuario),
                 joinedload(Taller.talleres_auxilio).joinedload(TallerAuxilio.tipo_auxilio),
                 joinedload(Taller.talleres_tipo_vehiculo).joinedload(TallerTipoVehiculo.tipo_vehiculo),
+                joinedload(Taller.horarios_disponibilidad),
                 joinedload(Taller.tecnicos),
                 joinedload(Taller.unidades_moviles),
             )

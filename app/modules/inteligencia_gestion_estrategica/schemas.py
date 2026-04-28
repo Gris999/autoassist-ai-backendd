@@ -20,6 +20,7 @@ class PreguntasSugeridasResponse(BaseModel):
 class AnalisisIncidenteResponse(PreguntasSugeridasResponse):
     id_incidente: int | None = None
     clasificacion_ia: str
+    auxilio_sugerido: str | None = None
     confianza_clasificacion: float = Field(ge=0.0, le=1.0)
     prioridad: str
     resumen_ia: str
@@ -31,6 +32,7 @@ class AnalisisIncidenteResponse(PreguntasSugeridasResponse):
 
 class AnalisisIncidenteLLMResult(PreguntasSugeridasResponse):
     clasificacion_ia: str
+    auxilio_sugerido: str | None = None
     confianza_clasificacion: float = Field(ge=0.0, le=1.0)
     prioridad: str
     resumen_ia: str = Field(min_length=1, max_length=2000)
@@ -113,6 +115,7 @@ class TallerRecomendadoResponse(BaseModel):
 class AsignacionInteligenteResponse(BaseModel):
     id_incidente: int
     clasificacion_ia: str
+    auxilio_sugerido: str | None = None
     taller_recomendado: TallerRecomendadoResponse
     candidatos: list[TallerCandidatoResponse]
     total_candidatos: int

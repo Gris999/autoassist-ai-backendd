@@ -1,4 +1,5 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+import httpx
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
 from sqlalchemy.orm import Session
 
 from app.core.db.session import get_db
@@ -9,7 +10,11 @@ from app.modules.gestion_incidentes_atencion.schemas import (
     ActualizarEstadoServicioRequest,
     AsignacionIncidenteRequest,
     AsignacionIncidenteResponse,
+    CompletarInformacionIncidenteRequest,
+    AudioTranscriptionRequest,
+    AudioTranscriptionResponse,
     EstadoServicioIncidenteResponse,
+    EvidenciaUploadResponse,
     IncidenteAsignadoDetailResponse,
     IncidenteAsignadoListResponse,
     IncidenteCreateRequest,
@@ -25,6 +30,7 @@ from app.modules.gestion_incidentes_atencion.schemas import (
 from app.modules.gestion_incidentes_atencion.service import (
     actualizar_estado_servicio_incidente_service,
     asignar_tecnico_unidad_incidente_service,
+    completar_informacion_incidente_service,
     get_estado_servicio_incidente_service,
     get_incidentes_disponibles_service,
     get_mis_incidentes_service,
@@ -36,6 +42,8 @@ from app.modules.gestion_incidentes_atencion.service import (
     obtener_incidente_asignado_tecnico_service,
     report_incidente_service,
     responder_solicitud_atencion_service,
+    transcribir_audio_subido_service,
+    upload_evidencia_service,
 )
 
 router = APIRouter(prefix="/incidentes", tags=["Gestion Incidentes y Atencion"])
@@ -59,6 +67,61 @@ def listar_tipos_incidente(
 
 
 @router.post(
+    "/evidencias/upload",
+    response_model=EvidenciaUploadResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def upload_evidencia(
+    request: Request,
+    file: UploadFile = File(...),
+    current_user: Usuario = Depends(require_roles("CLIENTE")),
+):
+    try:
+        _ = current_user
+        return upload_evidencia_service(
+            file,
+            public_base_url=str(request.base_url).rstrip("/"),
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
+
+@router.post(
+    "/evidencias/transcribir-audio",
+    response_model=AudioTranscriptionResponse,
+    status_code=status.HTTP_200_OK,
+)
+def transcribir_audio_subido(
+    payload: AudioTranscriptionRequest,
+    current_user: Usuario = Depends(require_roles("CLIENTE")),
+):
+    try:
+        _ = current_user
+        return transcribir_audio_subido_service(archivo_url=payload.archivo_url)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=(
+                "Gemini respondio con error durante la transcripcion del audio: "
+                f"{e.response.status_code}."
+            ),
+        )
+    except httpx.HTTPError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="No fue posible comunicarse con Gemini para transcribir el audio.",
+        )
+
+
+@router.post(
     "",
     response_model=IncidenteResponse,
     status_code=status.HTTP_201_CREATED,
@@ -70,6 +133,31 @@ def report_incidente(
 ):
     try:
         return report_incidente_service(db, current_user, payload)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
+
+@router.patch(
+    "/{id_incidente}/completar-informacion",
+    response_model=IncidenteResponse,
+    status_code=status.HTTP_200_OK,
+)
+def completar_informacion_incidente(
+    id_incidente: int,
+    payload: CompletarInformacionIncidenteRequest,
+    current_user: Usuario = Depends(require_roles("CLIENTE")),
+    db: Session = Depends(get_db),
+):
+    try:
+        return completar_informacion_incidente_service(
+            db,
+            current_user,
+            id_incidente,
+            payload,
+        )
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
