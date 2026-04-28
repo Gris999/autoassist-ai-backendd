@@ -7,6 +7,9 @@ import anyio
 import httpx
 from sqlalchemy.orm import Session
 from app.core.config.settings import settings
+from app.modules.inteligencia_gestion_estrategica.commission_service import (
+    generate_platform_commission_for_payment,
+)
 
 from app.modules.gestion_clientes.repository import get_cliente_by_usuario_id
 from app.modules.gestion_operativa_taller_tecnico.repository import (
@@ -82,7 +85,6 @@ from app.modules.seguimiento_monitoreo_servicio.repository import (
     update_dispositivo_push_activo,
     update_notificacion_push_result,
     upsert_dispositivo_push,
-    upsert_comision_plataforma,
 )
 from app.modules.gestion_incidentes_atencion.repository import (
     create_historial_incidente,
@@ -1099,9 +1101,6 @@ def _persistir_pago_confirmado_desde_stripe(
             subtotal=detalle.subtotal,
         )
 
-    comision = (
-        monto_total * Decimal(str(settings.PLATFORM_COMMISSION_PERCENTAGE)) / Decimal("100")
-    ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     update_pago_servicio(
         db,
         pago_servicio,
@@ -1111,15 +1110,10 @@ def _persistir_pago_confirmado_desde_stripe(
         referencia_transaccion=stripe_payment_intent.id,
         fecha_pago=datetime.utcnow(),
     )
-    upsert_comision_plataforma(
+    generate_platform_commission_for_payment(
         db,
         pago_servicio=pago_servicio,
-        id_taller=incidente.asignacion_servicio.id_taller,
-        porcentaje=Decimal(str(settings.PLATFORM_COMMISSION_PERCENTAGE)).quantize(
-            Decimal("0.01"), rounding=ROUND_HALF_UP
-        ),
-        monto_comision=comision,
-        estado="PENDIENTE_LIQUIDACION",
+        recalcular=True,
     )
 
 
@@ -1147,9 +1141,6 @@ def _persistir_pago_demo_confirmado(
             subtotal=detalle.subtotal,
         )
 
-    comision = (
-        monto_total * Decimal(str(settings.PLATFORM_COMMISSION_PERCENTAGE)) / Decimal("100")
-    ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     update_pago_servicio(
         db,
         pago_servicio,
@@ -1159,15 +1150,10 @@ def _persistir_pago_demo_confirmado(
         referencia_transaccion=referencia_transaccion,
         fecha_pago=datetime.utcnow(),
     )
-    upsert_comision_plataforma(
+    generate_platform_commission_for_payment(
         db,
         pago_servicio=pago_servicio,
-        id_taller=incidente.asignacion_servicio.id_taller,
-        porcentaje=Decimal(str(settings.PLATFORM_COMMISSION_PERCENTAGE)).quantize(
-            Decimal("0.01"), rounding=ROUND_HALF_UP
-        ),
-        monto_comision=comision,
-        estado="PENDIENTE_LIQUIDACION",
+        recalcular=True,
     )
 
 

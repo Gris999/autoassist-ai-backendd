@@ -24,6 +24,9 @@ class AnalisisIncidenteResponse(PreguntasSugeridasResponse):
     prioridad: str
     resumen_ia: str
     requiere_mas_info: bool
+    fuente_analisis: str = "reglas"
+    modelo_analisis: str | None = None
+    fallback_usado: bool = False
 
 
 class AnalisisIncidenteLLMResult(PreguntasSugeridasResponse):
@@ -96,6 +99,7 @@ class TallerCandidatoResponse(BaseModel):
     tecnico_disponible: bool
     unidad_movil_disponible: bool
     estado_solicitud: str
+    justificacion_ranking: str | None = None
 
 
 class TallerRecomendadoResponse(BaseModel):
@@ -103,6 +107,7 @@ class TallerRecomendadoResponse(BaseModel):
     nombre_taller: str
     distancia_km: float
     puntaje_asignacion: float
+    justificacion_ranking: str | None = None
 
 
 class AsignacionInteligenteResponse(BaseModel):
@@ -112,6 +117,10 @@ class AsignacionInteligenteResponse(BaseModel):
     candidatos: list[TallerCandidatoResponse]
     total_candidatos: int
     mensaje: str
+    fuente_evaluacion: str = "reglas"
+    modelo_evaluacion: str | None = None
+    fallback_usado: bool = False
+    justificacion_global: str | None = None
 
 
 class MetricaIncidenteListResponse(BaseModel):
@@ -135,4 +144,72 @@ class MetricaIncidenteDetailResponse(MetricaIncidenteListResponse):
     tiempo_resolucion_seg: int | None = None
     cantidad_rechazos: int
     fue_reasignado: bool
+
+
+class GeminiTallerRankingCandidate(BaseModel):
+    id_taller: int
+    ajuste_puntaje: float = Field(ge=-15.0, le=15.0)
+    justificacion: str = Field(min_length=1, max_length=400)
+
+
+class GeminiTallerRankingResult(BaseModel):
+    justificacion_global: str = Field(min_length=1, max_length=1200)
+    candidatos: list[GeminiTallerRankingCandidate] = Field(default_factory=list)
+
+
+class ComisionPlataformaGenerateRequest(BaseModel):
+    id_pago_servicio: int | None = None
+    recalcular: bool = False
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class ComisionPlataformaListResponse(BaseModel):
+    id_comision: int
+    id_pago_servicio: int
+    id_incidente: int
+    titulo_incidente: str
+    id_taller: int
+    nombre_taller: str
+    monto_total_pago: Decimal
+    porcentaje: Decimal
+    monto_comision: Decimal
+    estado: str
+    estado_pago: str
+    fecha_pago: datetime | None = None
+    fecha_calculo: datetime
+    referencia_transaccion: str | None = None
+
+
+class ComisionDetallePagoResponse(BaseModel):
+    id_detalle_pago: int
+    descripcion: str
+    cantidad: int
+    precio_unitario: Decimal
+    subtotal: Decimal
+    id_taller_auxilio: int
+    tipo_auxilio: str | None = None
+
+
+class ComisionPlataformaDetailResponse(ComisionPlataformaListResponse):
+    metodo_pago: str
+    detalles_pago: list[ComisionDetallePagoResponse] = Field(default_factory=list)
+
+
+class ComisionPlataformaGenerateItemResponse(BaseModel):
+    id_comision: int
+    id_pago_servicio: int
+    id_incidente: int
+    id_taller: int
+    porcentaje: Decimal
+    monto_comision: Decimal
+    estado: str
+    creada: bool
+    recalculada: bool
+
+
+class ComisionPlataformaGenerateResponse(BaseModel):
+    total_procesadas: int
+    comisiones: list[ComisionPlataformaGenerateItemResponse] = Field(default_factory=list)
+    mensaje: str
 

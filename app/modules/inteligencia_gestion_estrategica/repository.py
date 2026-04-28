@@ -3,6 +3,7 @@ from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
 
+from app.modules.autenticacion_seguridad.models import BitacoraSistema
 from app.modules.autenticacion_seguridad.models import Usuario
 from app.modules.gestion_clientes.models import Cliente, Vehiculo
 from app.modules.gestion_incidentes_atencion.models import (
@@ -20,8 +21,13 @@ from app.modules.gestion_operativa_taller_tecnico.models import (
     Tecnico,
     UnidadMovil,
 )
-from app.modules.seguimiento_monitoreo_servicio.models import Notificacion
-from app.modules.seguimiento_monitoreo_servicio.models import MetricaIncidente
+from app.modules.seguimiento_monitoreo_servicio.models import (
+    ComisionPlataforma,
+    DetallePago,
+    MetricaIncidente,
+    Notificacion,
+    PagoServicio,
+)
 
 
 def get_incidente_by_id(db: Session, id_incidente: int) -> Incidente | None:
@@ -342,3 +348,151 @@ def update_solicitud_taller_candidate_data(
     db.flush()
     db.refresh(solicitud_taller)
     return solicitud_taller
+
+
+def get_pago_servicio_with_comision_by_id(
+    db: Session,
+    id_pago_servicio: int,
+) -> PagoServicio | None:
+    return db.execute(
+        select(PagoServicio)
+        .options(
+            joinedload(PagoServicio.detalles_pago)
+            .joinedload(DetallePago.taller_auxilio)
+            .joinedload(TallerAuxilio.tipo_auxilio),
+            joinedload(PagoServicio.comision_plataforma),
+            joinedload(PagoServicio.incidente)
+            .joinedload(Incidente.asignacion_servicio)
+            .joinedload(AsignacionServicio.taller.of_type(Taller)),
+        )
+        .where(PagoServicio.id_pago_servicio == id_pago_servicio)
+    ).unique().scalar_one_or_none()
+
+
+def get_comision_plataforma_by_id(
+    db: Session,
+    id_comision: int,
+) -> ComisionPlataforma | None:
+    return db.execute(
+        select(ComisionPlataforma)
+        .options(
+            joinedload(ComisionPlataforma.pago_servicio)
+            .joinedload(PagoServicio.detalles_pago)
+            .joinedload(DetallePago.taller_auxilio)
+            .joinedload(TallerAuxilio.tipo_auxilio),
+            joinedload(ComisionPlataforma.pago_servicio)
+            .joinedload(PagoServicio.incidente)
+            .joinedload(Incidente.asignacion_servicio)
+            .joinedload(AsignacionServicio.taller.of_type(Taller)),
+            joinedload(ComisionPlataforma.taller),
+        )
+        .where(ComisionPlataforma.id_comision == id_comision)
+    ).unique().scalar_one_or_none()
+
+
+def list_comisiones_plataforma(
+    db: Session,
+    *,
+    id_taller: int | None = None,
+    estado: str | None = None,
+    id_pago_servicio: int | None = None,
+    id_incidente: int | None = None,
+) -> list[ComisionPlataforma]:
+    query = (
+        select(ComisionPlataforma)
+        .options(
+            joinedload(ComisionPlataforma.pago_servicio)
+            .joinedload(PagoServicio.incidente)
+            .joinedload(Incidente.asignacion_servicio)
+            .joinedload(AsignacionServicio.taller.of_type(Taller)),
+            joinedload(ComisionPlataforma.taller),
+        )
+        .join(ComisionPlataforma.pago_servicio)
+        .join(PagoServicio.incidente)
+        .order_by(ComisionPlataforma.fecha_calculo.desc(), ComisionPlataforma.id_comision.desc())
+    )
+
+    if id_taller is not None:
+        query = query.where(ComisionPlataforma.id_taller == id_taller)
+    if estado:
+        query = query.where(ComisionPlataforma.estado == estado)
+    if id_pago_servicio is not None:
+        query = query.where(ComisionPlataforma.id_pago_servicio == id_pago_servicio)
+    if id_incidente is not None:
+        query = query.where(PagoServicio.id_incidente == id_incidente)
+
+    return list(db.execute(query).unique().scalars())
+
+
+def list_pagos_servicio_elegibles_para_comision(
+    db: Session,
+    *,
+    incluir_con_comision: bool = False,
+) -> list[PagoServicio]:
+    query = (
+        select(PagoServicio)
+        .options(
+            joinedload(PagoServicio.detalles_pago)
+            .joinedload(DetallePago.taller_auxilio)
+            .joinedload(TallerAuxilio.tipo_auxilio),
+            joinedload(PagoServicio.comision_plataforma),
+            joinedload(PagoServicio.incidente)
+            .joinedload(Incidente.asignacion_servicio)
+            .joinedload(AsignacionServicio.taller.of_type(Taller)),
+        )
+        .where(PagoServicio.estado_pago == "PAGADO")
+        .order_by(PagoServicio.fecha_pago.desc(), PagoServicio.id_pago_servicio.desc())
+    )
+
+    pagos = list(db.execute(query).unique().scalars())
+    if incluir_con_comision:
+        return pagos
+    return [pago for pago in pagos if pago.comision_plataforma is None]
+
+
+def create_bitacora_comision(
+    db: Session,
+    *,
+    id_usuario: int,
+    accion: str,
+    descripcion: str,
+) -> BitacoraSistema:
+    bitacora = BitacoraSistema(
+        id_usuario=id_usuario,
+        accion=accion,
+        modulo="INTELIGENCIA_GESTION_ESTRATEGICA_COMISIONES",
+        descripcion=descripcion,
+    )
+    db.add(bitacora)
+    db.flush()
+    db.refresh(bitacora)
+    return bitacora
+
+
+def upsert_comision_plataforma_inteligencia(
+    db: Session,
+    *,
+    pago_servicio: PagoServicio,
+    id_taller: int,
+    porcentaje,
+    monto_comision,
+    estado: str,
+) -> ComisionPlataforma:
+    comision = pago_servicio.comision_plataforma
+    if comision is None:
+        comision = ComisionPlataforma(
+            id_pago_servicio=pago_servicio.id_pago_servicio,
+            id_taller=id_taller,
+            porcentaje=porcentaje,
+            monto_comision=monto_comision,
+            estado=estado,
+        )
+        db.add(comision)
+    else:
+        comision.id_taller = id_taller
+        comision.porcentaje = porcentaje
+        comision.monto_comision = monto_comision
+        comision.estado = estado
+    db.flush()
+    db.refresh(comision)
+    return comision

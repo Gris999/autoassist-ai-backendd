@@ -1,5 +1,5 @@
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.core.db.session import get_db
@@ -11,6 +11,10 @@ from app.modules.inteligencia_gestion_estrategica.schemas import (
     AnalisisIncidenteManualRequest,
     AnalisisIncidenteResponse,
     AsignacionInteligenteResponse,
+    ComisionPlataformaDetailResponse,
+    ComisionPlataformaGenerateRequest,
+    ComisionPlataformaGenerateResponse,
+    ComisionPlataformaListResponse,
     EvidenciaProcesadaResponse,
     MetricaIncidenteDetailResponse,
     MetricaIncidenteListResponse,
@@ -20,6 +24,9 @@ from app.modules.inteligencia_gestion_estrategica.schemas import (
 from app.modules.inteligencia_gestion_estrategica.service import (
     IncidentClassificationInsufficientError,
     IncidentClientNotFoundError,
+    CommissionAlreadyExistsError,
+    CommissionConfigurationError,
+    CommissionNotFoundError,
     IncidentDoesNotRequireMoreInformationError,
     IncidentLocationInvalidError,
     IncidentNotFoundError,
@@ -28,8 +35,13 @@ from app.modules.inteligencia_gestion_estrategica.service import (
     IncidentVehicleNotFoundError,
     ImageEvidenceNotFoundError,
     listar_metricas_incidentes_service,
+    listar_comisiones_plataforma_service,
     NoCandidateTallerFoundError,
+    NoCommissionEligiblePaymentsError,
     obtener_metrica_incidente_service,
+    obtener_comision_plataforma_service,
+    generar_comisiones_plataforma_service,
+    PaymentNotEligibleForCommissionError,
     RoboflowConfigurationError,
     analizar_imagen_incidente_roboflow_service,
     asignar_taller_inteligentemente_service,
@@ -306,4 +318,100 @@ def obtener_metrica_incidente(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Ocurrio un error inesperado al generar la metrica del incidente.",
+        ) from exc
+
+
+@router.get(
+    "/comisiones",
+    response_model=list[ComisionPlataformaListResponse],
+    status_code=status.HTTP_200_OK,
+)
+def listar_comisiones_plataforma(
+    current_user: Usuario = Depends(require_roles("ADMIN")),
+    db: Session = Depends(get_db),
+    id_taller: int | None = Query(default=None, ge=1),
+    estado: str | None = Query(default=None, min_length=1, max_length=50),
+    id_pago_servicio: int | None = Query(default=None, ge=1),
+    id_incidente: int | None = Query(default=None, ge=1),
+):
+    try:
+        return listar_comisiones_plataforma_service(
+            db,
+            id_taller=id_taller,
+            estado=estado.strip() if estado else None,
+            id_pago_servicio=id_pago_servicio,
+            id_incidente=id_incidente,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Ocurrio un error inesperado al listar las comisiones de la plataforma.",
+        ) from exc
+
+
+@router.get(
+    "/comisiones/{id_comision}",
+    response_model=ComisionPlataformaDetailResponse,
+    status_code=status.HTTP_200_OK,
+)
+def obtener_comision_plataforma(
+    id_comision: int,
+    current_user: Usuario = Depends(require_roles("ADMIN")),
+    db: Session = Depends(get_db),
+):
+    try:
+        return obtener_comision_plataforma_service(db, id_comision)
+    except CommissionNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Ocurrio un error inesperado al consultar el detalle de la comision.",
+        ) from exc
+
+
+@router.post(
+    "/comisiones/generar",
+    response_model=ComisionPlataformaGenerateResponse,
+    status_code=status.HTTP_200_OK,
+)
+def generar_comisiones_plataforma(
+    payload: ComisionPlataformaGenerateRequest,
+    current_user: Usuario = Depends(require_roles("ADMIN")),
+    db: Session = Depends(get_db),
+):
+    try:
+        return generar_comisiones_plataforma_service(db, current_user, payload)
+    except (NoCommissionEligiblePaymentsError, CommissionNotFoundError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except (
+        CommissionAlreadyExistsError,
+        CommissionConfigurationError,
+        PaymentNotEligibleForCommissionError,
+        ValueError,
+    ) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Ocurrio un error inesperado al generar las comisiones de la plataforma.",
         ) from exc

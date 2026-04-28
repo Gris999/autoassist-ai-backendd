@@ -8,11 +8,22 @@ import httpx
 from sqlalchemy.orm import Session
 
 from app.core.config.settings import settings
+from app.modules.inteligencia_gestion_estrategica.commission_service import (
+    CommissionAlreadyExistsError,
+    CommissionConfigurationError,
+    CommissionNotFoundError,
+    NoCommissionEligiblePaymentsError,
+    PaymentNotEligibleForCommissionError,
+    decimal_amount as commission_decimal_amount,
+    generate_platform_commission_for_payment,
+    resolve_pago_taller,
+)
 from app.modules.inteligencia_gestion_estrategica.repository import (
     create_solicitud_taller,
     create_processed_evidence,
     create_notification,
     get_cliente_by_id,
+    get_comision_plataforma_by_id,
     get_evidencia_by_id_and_incidente_id,
     get_evidencia_textos_by_incidente_id,
     get_incidente_by_id,
@@ -24,7 +35,10 @@ from app.modules.inteligencia_gestion_estrategica.repository import (
     get_pending_notification_by_incidente_usuario_tipo,
     get_solicitud_taller_by_incidente_and_taller,
     get_usuario_by_id,
+    get_pago_servicio_with_comision_by_id,
+    list_comisiones_plataforma,
     list_incidentes_metrics_context,
+    list_pagos_servicio_elegibles_para_comision,
     list_available_talleres_with_resources,
     list_evidences_by_incidente_id,
     upsert_metrica_incidente,
@@ -38,7 +52,14 @@ from app.modules.inteligencia_gestion_estrategica.schemas import (
     AnalisisIncidenteLLMResult,
     AnalisisIncidenteResponse,
     AsignacionInteligenteResponse,
+    ComisionDetallePagoResponse,
+    ComisionPlataformaDetailResponse,
+    ComisionPlataformaGenerateItemResponse,
+    ComisionPlataformaGenerateRequest,
+    ComisionPlataformaGenerateResponse,
+    ComisionPlataformaListResponse,
     EvidenciaProcesadaResponse,
+    GeminiTallerRankingResult,
     MetricaIncidenteDetailResponse,
     MetricaIncidenteListResponse,
     RegistrarEvidenciaProcesadaRequest,
@@ -589,6 +610,69 @@ def _get_llm_analysis_schema() -> dict:
     }
 
 
+def _get_gemini_taller_ranking_schema() -> dict:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "justificacion_global": {"type": "string"},
+            "candidatos": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "id_taller": {"type": "integer"},
+                        "ajuste_puntaje": {
+                            "type": "number",
+                            "minimum": -15,
+                            "maximum": 15,
+                        },
+                        "justificacion": {"type": "string"},
+                    },
+                    "required": [
+                        "id_taller",
+                        "ajuste_puntaje",
+                        "justificacion",
+                    ],
+                },
+            },
+        },
+        "required": ["justificacion_global", "candidatos"],
+    }
+
+
+def _build_gemini_taller_ranking_input_payload(
+    *,
+    incidente,
+    candidatos: list[dict],
+) -> str:
+    payload = {
+        "incidente": {
+            "id_incidente": incidente.id_incidente,
+            "titulo": incidente.titulo,
+            "clasificacion_ia": incidente.clasificacion_ia,
+            "prioridad": incidente.prioridad.nombre if incidente.prioridad else None,
+            "tipo_incidente": (
+                incidente.tipo_incidente.nombre if incidente.tipo_incidente else None
+            ),
+            "latitud": float(incidente.latitud) if incidente.latitud is not None else None,
+            "longitud": float(incidente.longitud) if incidente.longitud is not None else None,
+            "requiere_mas_info": incidente.requiere_mas_info,
+        },
+        "candidatos": candidatos,
+        "instrucciones": [
+            "Evalua talleres candidatos para atender el incidente.",
+            "Usa unicamente los datos entregados en el JSON.",
+            "No inventes servicios, distancias ni disponibilidad.",
+            "Devuelve un ajuste de puntaje entre -15 y 15 por candidato.",
+            "Favorece compatibilidad tecnica y cercania antes que preferencias subjetivas.",
+            "Incluye una justificacion corta por candidato y una justificacion global.",
+        ],
+    }
+    return json.dumps(payload, ensure_ascii=True)
+
+
 def _run_gemini_incident_analysis(
     *,
     descripcion_texto: str | None,
@@ -670,6 +754,65 @@ def _run_gemini_incident_analysis(
         requiere_mas_info=requires_more_info,
         preguntas_sugeridas=preguntas_sugeridas,
     )
+
+
+def _run_gemini_taller_ranking_analysis(
+    *,
+    incidente,
+    candidatos: list[dict],
+) -> GeminiTallerRankingResult:
+    if not settings.GEMINI_API_KEY:
+        raise ValueError("GEMINI_API_KEY no configurada.")
+
+    response = httpx.post(
+        f"https://generativelanguage.googleapis.com/v1beta/models/{settings.GEMINI_MODEL}:generateContent",
+        headers={
+            "x-goog-api-key": settings.GEMINI_API_KEY,
+            "Content-Type": "application/json",
+        },
+        json={
+            "system_instruction": {
+                "parts": [
+                    {
+                        "text": (
+                            "Eres un evaluador de talleres candidatos para AutoAssist AI. "
+                            "Debes responder estrictamente en JSON valido segun el esquema solicitado."
+                        )
+                    }
+                ]
+            },
+            "contents": [
+                {
+                    "parts": [
+                        {
+                            "text": _build_gemini_taller_ranking_input_payload(
+                                incidente=incidente,
+                                candidatos=candidatos,
+                            )
+                        }
+                    ]
+                }
+            ],
+            "generationConfig": {
+                "responseMimeType": "application/json",
+                "responseJsonSchema": _get_gemini_taller_ranking_schema(),
+            },
+        },
+        timeout=settings.GEMINI_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+
+    response_payload = response.json()
+    text_payload = (
+        response_payload.get("candidates", [{}])[0]
+        .get("content", {})
+        .get("parts", [{}])[0]
+        .get("text")
+    )
+    if not text_payload:
+        raise ValueError("Gemini no devolvio un ranking JSON util para talleres.")
+
+    return GeminiTallerRankingResult.model_validate(json.loads(text_payload))
 
 
 def _run_openai_incident_analysis(
@@ -1033,6 +1176,7 @@ def _build_taller_candidate_response(
     tecnico_disponible: bool,
     unidad_movil_disponible: bool,
     estado_solicitud: str,
+    justificacion_ranking: str | None = None,
 ) -> TallerCandidatoResponse:
     return TallerCandidatoResponse(
         id_taller=taller.id_taller,
@@ -1045,6 +1189,7 @@ def _build_taller_candidate_response(
         tecnico_disponible=tecnico_disponible,
         unidad_movil_disponible=unidad_movil_disponible,
         estado_solicitud=estado_solicitud,
+        justificacion_ranking=justificacion_ranking,
     )
 
 
@@ -1260,6 +1405,9 @@ def _run_rule_based_incident_analysis(
     texto_evidencias: list[str],
     latitud: Decimal | None,
     longitud: Decimal | None,
+    fuente_analisis: str = "reglas",
+    modelo_analisis: str | None = None,
+    fallback_usado: bool = False,
 ) -> AnalisisIncidenteResponse:
     category, confidence, matches_by_category, text_parts = _classify_incident(
         descripcion_texto,
@@ -1291,6 +1439,9 @@ def _run_rule_based_incident_analysis(
         resumen_ia=summary,
         requiere_mas_info=requires_more_info,
         preguntas_sugeridas=suggested_questions,
+        fuente_analisis=fuente_analisis,
+        modelo_analisis=modelo_analisis,
+        fallback_usado=fallback_usado,
     )
 
 
@@ -1303,9 +1454,14 @@ def _run_incident_analysis(
     longitud: Decimal | None,
 ) -> AnalisisIncidenteResponse:
     provider = settings.AI_PROVIDER.strip().lower()
+    attempted_provider = None
+    attempted_model = None
+    fallback_used = False
 
     try:
         if provider == "openrouter" and settings.OPENROUTER_API_KEY:
+            attempted_provider = "openrouter"
+            attempted_model = settings.OPENROUTER_MODEL
             llm_result = _run_openrouter_incident_analysis(
                 descripcion_texto=descripcion_texto,
                 texto_evidencias=texto_evidencias,
@@ -1313,6 +1469,8 @@ def _run_incident_analysis(
                 longitud=longitud,
             )
         elif provider == "gemini" and settings.GEMINI_API_KEY:
+            attempted_provider = "gemini"
+            attempted_model = settings.GEMINI_MODEL
             llm_result = _run_gemini_incident_analysis(
                 descripcion_texto=descripcion_texto,
                 texto_evidencias=texto_evidencias,
@@ -1320,6 +1478,8 @@ def _run_incident_analysis(
                 longitud=longitud,
             )
         elif provider == "openai" and settings.OPENAI_API_KEY:
+            attempted_provider = "openai"
+            attempted_model = settings.OPENAI_MODEL
             llm_result = _run_openai_incident_analysis(
                 descripcion_texto=descripcion_texto,
                 texto_evidencias=texto_evidencias,
@@ -1331,6 +1491,7 @@ def _run_incident_analysis(
     except Exception:
         if not settings.AI_USE_FALLBACK:
             raise
+        fallback_used = attempted_provider is not None
         llm_result = None
 
     if llm_result is not None:
@@ -1342,6 +1503,9 @@ def _run_incident_analysis(
             resumen_ia=llm_result.resumen_ia,
             requiere_mas_info=llm_result.requiere_mas_info,
             preguntas_sugeridas=llm_result.preguntas_sugeridas,
+            fuente_analisis=attempted_provider or "reglas",
+            modelo_analisis=attempted_model,
+            fallback_usado=False,
         )
 
     return _run_rule_based_incident_analysis(
@@ -1350,6 +1514,9 @@ def _run_incident_analysis(
         texto_evidencias=texto_evidencias,
         latitud=latitud,
         longitud=longitud,
+        fuente_analisis="reglas",
+        modelo_analisis=attempted_model if fallback_used else None,
+        fallback_usado=fallback_used,
     )
 
 
@@ -1619,7 +1786,11 @@ def asignar_taller_inteligentemente_service(
     vehicle_type_id = incidente.vehiculo.id_tipo_vehiculo
 
     talleres = list_available_talleres_with_resources(db)
-    candidatos_registrados: list[TallerCandidatoResponse] = []
+    candidate_entries: list[dict] = []
+    fuente_evaluacion = "reglas"
+    modelo_evaluacion = None
+    fallback_usado = False
+    justificacion_global = None
 
     for taller in talleres:
         if taller.latitud is None or taller.longitud is None or taller.radio_cobertura_km is None:
@@ -1665,39 +1836,114 @@ def asignar_taller_inteligentemente_service(
         if existing_solicitud and existing_solicitud.estado_solicitud in ESTADOS_SOLICITUD_EXCLUIDOS:
             continue
 
-        if existing_solicitud:
+        candidate_entries.append(
+            {
+                "taller": taller,
+                "distancia_km": round(distance_km, 2),
+                "puntaje_base": round(total_score, 2),
+                "puntaje_final": round(total_score, 2),
+                "taller_disponible": taller_disponible,
+                "tecnico_disponible": tecnico_disponible,
+                "unidad_movil_disponible": unidad_movil_disponible,
+                "existing_solicitud": existing_solicitud,
+                "estado_solicitud": (
+                    existing_solicitud.estado_solicitud
+                    if existing_solicitud
+                    else ESTADO_SOLICITUD_INTELIGENTE
+                ),
+                "servicio_compatible": (
+                    auxilio_compatible.tipo_auxilio.nombre
+                    if auxilio_compatible and auxilio_compatible.tipo_auxilio
+                    else None
+                ),
+                "requiere_unidad_movil": bool(
+                    auxilio_compatible.tipo_auxilio.requiere_unidad_movil
+                ),
+                "justificacion_ranking": None,
+            }
+        )
+
+    if not candidate_entries:
+        db.rollback()
+        raise NoCandidateTallerFoundError(
+            "No existen talleres disponibles y compatibles para atender el incidente."
+        )
+
+    if settings.AI_PROVIDER.strip().lower() == "gemini" and settings.GEMINI_API_KEY:
+        try:
+            ranking_result = _run_gemini_taller_ranking_analysis(
+                incidente=incidente,
+                candidatos=[
+                    {
+                        "id_taller": entry["taller"].id_taller,
+                        "nombre_taller": entry["taller"].nombre_taller,
+                        "distancia_km": entry["distancia_km"],
+                        "puntaje_base": entry["puntaje_base"],
+                        "servicio_compatible": entry["servicio_compatible"],
+                        "tipo_vehiculo_compatible": True,
+                        "taller_disponible": entry["taller_disponible"],
+                        "tecnico_disponible": entry["tecnico_disponible"],
+                        "unidad_movil_disponible": entry["unidad_movil_disponible"],
+                        "requiere_unidad_movil": entry["requiere_unidad_movil"],
+                    }
+                    for entry in candidate_entries
+                ],
+            )
+            rank_map = {
+                candidate.id_taller: candidate
+                for candidate in ranking_result.candidatos
+            }
+            for entry in candidate_entries:
+                llm_candidate = rank_map.get(entry["taller"].id_taller)
+                if llm_candidate is None:
+                    continue
+                adjusted_score = entry["puntaje_base"] + llm_candidate.ajuste_puntaje
+                entry["puntaje_final"] = round(min(max(adjusted_score, 0.0), 100.0), 2)
+                entry["justificacion_ranking"] = llm_candidate.justificacion.strip()
+
+            fuente_evaluacion = "gemini"
+            modelo_evaluacion = settings.GEMINI_MODEL
+            justificacion_global = ranking_result.justificacion_global.strip()
+        except Exception:
+            if not settings.AI_USE_FALLBACK:
+                db.rollback()
+                raise
+            fallback_usado = True
+            justificacion_global = (
+                "No fue posible obtener evaluacion directa de Gemini. "
+                "Se aplico el ranking deterministico configurado."
+            )
+
+    candidatos_registrados: list[TallerCandidatoResponse] = []
+    for entry in candidate_entries:
+        if entry["existing_solicitud"]:
             solicitud = update_solicitud_taller_candidate_data(
                 db,
-                existing_solicitud,
-                distancia_km=distance_km,
-                puntaje_asignacion=total_score,
+                entry["existing_solicitud"],
+                distancia_km=entry["distancia_km"],
+                puntaje_asignacion=entry["puntaje_final"],
             )
         else:
             solicitud = create_solicitud_taller(
                 db,
                 id_incidente=incidente.id_incidente,
-                id_taller=taller.id_taller,
-                distancia_km=distance_km,
-                puntaje_asignacion=total_score,
+                id_taller=entry["taller"].id_taller,
+                distancia_km=entry["distancia_km"],
+                puntaje_asignacion=entry["puntaje_final"],
                 estado_solicitud=ESTADO_SOLICITUD_INTELIGENTE,
             )
 
         candidatos_registrados.append(
             _build_taller_candidate_response(
-                taller=taller,
-                distancia_km=distance_km,
-                puntaje_asignacion=total_score,
-                taller_disponible=taller_disponible,
-                tecnico_disponible=tecnico_disponible,
-                unidad_movil_disponible=unidad_movil_disponible,
+                taller=entry["taller"],
+                distancia_km=entry["distancia_km"],
+                puntaje_asignacion=entry["puntaje_final"],
+                taller_disponible=entry["taller_disponible"],
+                tecnico_disponible=entry["tecnico_disponible"],
+                unidad_movil_disponible=entry["unidad_movil_disponible"],
                 estado_solicitud=solicitud.estado_solicitud,
+                justificacion_ranking=entry["justificacion_ranking"],
             )
-        )
-
-    if not candidatos_registrados:
-        db.rollback()
-        raise NoCandidateTallerFoundError(
-            "No existen talleres disponibles y compatibles para atender el incidente."
         )
 
     candidatos_registrados.sort(
@@ -1722,10 +1968,15 @@ def asignar_taller_inteligentemente_service(
             nombre_taller=taller_recomendado.nombre_taller,
             distancia_km=taller_recomendado.distancia_km,
             puntaje_asignacion=taller_recomendado.puntaje_asignacion,
+            justificacion_ranking=taller_recomendado.justificacion_ranking,
         ),
         candidatos=candidatos_registrados,
         total_candidatos=len(candidatos_registrados),
         mensaje="Taller recomendado correctamente.",
+        fuente_evaluacion=fuente_evaluacion,
+        modelo_evaluacion=modelo_evaluacion,
+        fallback_usado=fallback_usado,
+        justificacion_global=justificacion_global,
     )
 
 
@@ -1763,6 +2014,138 @@ def obtener_metrica_incidente_service(
         snapshot = _build_metric_snapshot(db, incidente)
         db.commit()
         return _to_metrica_incidente_detail_response(incidente, snapshot)
+    except Exception:
+        db.rollback()
+        raise
+
+
+def _to_comision_list_response(comision) -> ComisionPlataformaListResponse:
+    pago = comision.pago_servicio
+    incidente = pago.incidente
+    taller = comision.taller or resolve_pago_taller(pago)
+    return ComisionPlataformaListResponse(
+        id_comision=comision.id_comision,
+        id_pago_servicio=comision.id_pago_servicio,
+        id_incidente=pago.id_incidente,
+        titulo_incidente=incidente.titulo,
+        id_taller=comision.id_taller,
+        nombre_taller=taller.nombre_taller,
+        monto_total_pago=commission_decimal_amount(pago.monto_total),
+        porcentaje=commission_decimal_amount(comision.porcentaje),
+        monto_comision=commission_decimal_amount(comision.monto_comision),
+        estado=comision.estado,
+        estado_pago=pago.estado_pago,
+        fecha_pago=pago.fecha_pago,
+        fecha_calculo=comision.fecha_calculo,
+        referencia_transaccion=pago.referencia_transaccion,
+    )
+
+
+def _to_comision_detail_response(comision) -> ComisionPlataformaDetailResponse:
+    base = _to_comision_list_response(comision)
+    pago = comision.pago_servicio
+    return ComisionPlataformaDetailResponse(
+        **base.model_dump(),
+        metodo_pago=pago.metodo_pago,
+        detalles_pago=[
+            ComisionDetallePagoResponse(
+                id_detalle_pago=detalle.id_detalle_pago,
+                descripcion=detalle.descripcion,
+                cantidad=detalle.cantidad,
+                precio_unitario=commission_decimal_amount(detalle.precio_unitario),
+                subtotal=commission_decimal_amount(detalle.subtotal),
+                id_taller_auxilio=detalle.id_taller_auxilio,
+                tipo_auxilio=(
+                    detalle.taller_auxilio.tipo_auxilio.nombre
+                    if detalle.taller_auxilio and detalle.taller_auxilio.tipo_auxilio
+                    else None
+                ),
+            )
+            for detalle in pago.detalles_pago
+        ],
+    )
+
+
+def listar_comisiones_plataforma_service(
+    db: Session,
+    *,
+    id_taller: int | None = None,
+    estado: str | None = None,
+    id_pago_servicio: int | None = None,
+    id_incidente: int | None = None,
+) -> list[ComisionPlataformaListResponse]:
+    comisiones = list_comisiones_plataforma(
+        db,
+        id_taller=id_taller,
+        estado=estado,
+        id_pago_servicio=id_pago_servicio,
+        id_incidente=id_incidente,
+    )
+    return [_to_comision_list_response(comision) for comision in comisiones]
+
+
+def obtener_comision_plataforma_service(
+    db: Session,
+    id_comision: int,
+) -> ComisionPlataformaDetailResponse:
+    comision = get_comision_plataforma_by_id(db, id_comision)
+    if not comision:
+        raise CommissionNotFoundError("La comision especificada no existe.")
+    return _to_comision_detail_response(comision)
+
+
+def generar_comisiones_plataforma_service(
+    db: Session,
+    current_user,
+    payload: ComisionPlataformaGenerateRequest,
+) -> ComisionPlataformaGenerateResponse:
+    try:
+        if payload.id_pago_servicio is not None:
+            pagos = [get_pago_servicio_with_comision_by_id(db, payload.id_pago_servicio)]
+        else:
+            pagos = list_pagos_servicio_elegibles_para_comision(
+                db,
+                incluir_con_comision=payload.recalcular,
+            )
+
+        pagos = [pago for pago in pagos if pago is not None]
+        if not pagos:
+            raise NoCommissionEligiblePaymentsError(
+                "No existen pagos elegibles para generar comision."
+            )
+
+        resultados: list[ComisionPlataformaGenerateItemResponse] = []
+        for pago_servicio in pagos:
+            comision, creada = generate_platform_commission_for_payment(
+                db,
+                pago_servicio=pago_servicio,
+                recalcular=payload.recalcular,
+                id_usuario_actor=current_user.id_usuario,
+            )
+            resultados.append(
+                ComisionPlataformaGenerateItemResponse(
+                    id_comision=comision.id_comision,
+                    id_pago_servicio=comision.id_pago_servicio,
+                    id_incidente=pago_servicio.id_incidente,
+                    id_taller=comision.id_taller,
+                    porcentaje=_decimal_amount(comision.porcentaje),
+                    monto_comision=_decimal_amount(comision.monto_comision),
+                    estado=comision.estado,
+                    creada=creada,
+                    recalculada=not creada,
+                )
+            )
+
+        db.commit()
+        return ComisionPlataformaGenerateResponse(
+            total_procesadas=len(resultados),
+            comisiones=resultados,
+            mensaje=(
+                "Comisiones generadas correctamente."
+                if any(item.creada for item in resultados)
+                else "Comisiones recalculadas correctamente."
+            ),
+        )
     except Exception:
         db.rollback()
         raise
