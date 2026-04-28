@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     ROBOFLOW_API_KEY: str | None = None
     ROBOFLOW_MODEL_ID: str | None = None
     ROBOFLOW_TASK_TYPE: str = "classification"
+    ROBOFLOW_WORKSPACE: str | None = None
+    ROBOFLOW_PROJECT: str | None = None
+    ROBOFLOW_DATASET_VERSION: int | None = None
+    ROBOFLOW_TRAIN_ENDPOINT: str = "https://api.roboflow.com"
     ROBOFLOW_TIMEOUT_SECONDS: float = 30.0
     STRIPE_SECRET_KEY: str | None = None
     STRIPE_PUBLISHABLE_KEY: str | None = None

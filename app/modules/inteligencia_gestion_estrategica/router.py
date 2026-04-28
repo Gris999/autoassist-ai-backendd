@@ -15,6 +15,8 @@ from app.modules.inteligencia_gestion_estrategica.schemas import (
     ComisionPlataformaGenerateRequest,
     ComisionPlataformaGenerateResponse,
     ComisionPlataformaListResponse,
+    EntrenarModeloImagenRequest,
+    EntrenarModeloImagenResponse,
     EvidenciaProcesadaResponse,
     MetricaIncidenteDetailResponse,
     MetricaIncidenteListResponse,
@@ -44,6 +46,7 @@ from app.modules.inteligencia_gestion_estrategica.service import (
     PaymentNotEligibleForCommissionError,
     RoboflowConfigurationError,
     analizar_imagen_incidente_roboflow_service,
+    entrenar_modelo_imagen_roboflow_service,
     asignar_taller_inteligentemente_service,
     analizar_incidente_manual_service,
     analizar_incidente_por_id_service,
@@ -231,6 +234,41 @@ def analizar_imagen_incidente_roboflow(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Ocurrio un error inesperado al analizar la imagen con Roboflow.",
+        ) from exc
+
+
+@router.post(
+    "/roboflow/entrenar-imagenes",
+    response_model=EntrenarModeloImagenResponse,
+    status_code=status.HTTP_200_OK,
+)
+def entrenar_modelo_imagen_roboflow(
+    payload: EntrenarModeloImagenRequest,
+):
+    try:
+        return entrenar_modelo_imagen_roboflow_service(payload)
+    except RoboflowConfigurationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=(
+                "Roboflow respondio con error durante la solicitud de entrenamiento: "
+                f"{exc.response.status_code}."
+            ),
+        ) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="No fue posible comunicarse con Roboflow para entrenar el modelo.",
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Ocurrio un error inesperado al enviar el entrenamiento a Roboflow.",
         ) from exc
 
 

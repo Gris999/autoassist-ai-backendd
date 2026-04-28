@@ -66,6 +66,8 @@ from app.modules.inteligencia_gestion_estrategica.schemas import (
     ComisionPlataformaGenerateRequest,
     ComisionPlataformaGenerateResponse,
     ComisionPlataformaListResponse,
+    EntrenarModeloImagenRequest,
+    EntrenarModeloImagenResponse,
     EvidenciaProcesadaResponse,
     GeminiTallerRankingResult,
     MetricaIncidenteDetailResponse,
@@ -463,6 +465,66 @@ def _run_roboflow_image_analysis(*, image_url: str) -> tuple[str, str, float, st
         categoria_sugerida=categoria_sugerida,
     )
     return task_type, top_label, confidence, categoria_sugerida, [resumen_visual, *detections]
+
+
+def _resolve_roboflow_training_context(dataset_version: int | None = None) -> tuple[str, str, int]:
+    workspace = (settings.ROBOFLOW_WORKSPACE or "").strip()
+    project = (settings.ROBOFLOW_PROJECT or "").strip()
+    version = dataset_version or settings.ROBOFLOW_DATASET_VERSION
+
+    if not settings.ROBOFLOW_API_KEY:
+        raise RoboflowConfigurationError("ROBOFLOW_API_KEY debe estar configurada.")
+    if not workspace:
+        raise RoboflowConfigurationError("ROBOFLOW_WORKSPACE debe estar configurada.")
+    if not project:
+        raise RoboflowConfigurationError("ROBOFLOW_PROJECT debe estar configurada.")
+    if version is None or int(version) < 1:
+        raise RoboflowConfigurationError(
+            "ROBOFLOW_DATASET_VERSION debe estar configurada con un valor >= 1."
+        )
+
+    return workspace, project, int(version)
+
+
+def entrenar_modelo_imagen_roboflow_service(
+    payload: EntrenarModeloImagenRequest,
+) -> EntrenarModeloImagenResponse:
+    workspace, project, version = _resolve_roboflow_training_context(payload.dataset_version)
+
+    base_url = settings.ROBOFLOW_TRAIN_ENDPOINT.rstrip("/")
+    response = httpx.post(
+        f"{base_url}/{workspace}/{project}/{version}/train",
+        params={"api_key": settings.ROBOFLOW_API_KEY},
+        timeout=settings.ROBOFLOW_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+    data = response.json()
+
+    estado = str(
+        data.get("status")
+        or data.get("state")
+        or "queued"
+    )
+    job_id = data.get("job") or data.get("job_id")
+    if job_id is not None:
+        job_id = str(job_id)
+
+    mensaje = (
+        f"Entrenamiento enviado a Roboflow para {workspace}/{project} v{version}."
+    )
+    if payload.notas:
+        mensaje += f" Nota: {payload.notas.strip()}"
+
+    return EntrenarModeloImagenResponse(
+        proveedor="roboflow",
+        workspace=workspace,
+        proyecto=project,
+        version_dataset=version,
+        job_id=job_id,
+        estado=estado,
+        mensaje=mensaje,
+        detalle=data if isinstance(data, dict) else {"raw": data},
+    )
 
 
 def _clean_texts(texts: list[str | None]) -> list[str]:

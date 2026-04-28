@@ -90,6 +90,24 @@ class AnalisisImagenRoboflowResponse(BaseModel):
     mensaje: str
 
 
+class EntrenarModeloImagenRequest(BaseModel):
+    dataset_version: int | None = Field(default=None, ge=1)
+    notas: str | None = Field(default=None, max_length=500)
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class EntrenarModeloImagenResponse(BaseModel):
+    proveedor: str
+    workspace: str
+    proyecto: str
+    version_dataset: int
+    job_id: str | None = None
+    estado: str
+    mensaje: str
+    detalle: dict = Field(default_factory=dict)
+
+
 class TallerCandidatoResponse(BaseModel):
     id_taller: int
     nombre_taller: str
