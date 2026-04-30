@@ -37,14 +37,15 @@ def update_disponibilidad_taller(
     db: Session,
     *,
     id_taller: int,
-    disponible: bool,
+    disponible: bool | None = None,
     latitud: float | None = None,
     longitud: float | None = None,
     radio_cobertura_km: float | None = None,
 ) -> Taller:
     taller = get_taller_by_id(db, id_taller)
     if taller:
-        taller.disponible = disponible
+        if disponible is not None:
+            taller.disponible = disponible
         if latitud is not None:
             taller.latitud = latitud
         if longitud is not None:

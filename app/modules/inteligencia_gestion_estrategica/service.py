@@ -1284,6 +1284,7 @@ def _resolve_auxilio_name_for_incidente(incidente) -> str | None:
             "SIN_COMBUSTIBLE": AUXILIO_COMBUSTIBLE,
             "LLAVES_DENTRO": AUXILIO_APERTURA,
             "FALLA_MECANICA": AUXILIO_MECANICO,
+            "SOBRECALENTAMIENTO": AUXILIO_MECANICO,
             "ACCIDENTE_MENOR": AUXILIO_REMOLQUE,
         }
         auxilio = incident_type_to_auxilio.get(tipo_incidente_nombre)
@@ -1329,6 +1330,9 @@ def _get_incident_datetime(incidente) -> datetime:
 
 
 def _is_taller_schedule_compatible(taller, incidente) -> bool:
+    if not taller.horarios_disponibilidad:
+        return True
+
     incident_dt = _get_incident_datetime(incidente)
     day_mapping = {
         "MONDAY": "LUNES",
@@ -1342,9 +1346,11 @@ def _is_taller_schedule_compatible(taller, incidente) -> bool:
     dia_semana = day_mapping.get(incident_dt.strftime("%A").upper(), "")
     hora_incidente = incident_dt.time()
 
-    for horario in taller.horarios_disponibilidad:
-        if not horario.estado:
-            continue
+    active_horarios = [horario for horario in taller.horarios_disponibilidad if horario.estado]
+    if not active_horarios:
+        return True
+
+    for horario in active_horarios:
         if horario.dia_semana.strip().upper() != dia_semana:
             continue
         if horario.hora_inicio <= hora_incidente <= horario.hora_fin:
@@ -1724,6 +1730,9 @@ def _run_incident_analysis(
     latitud: Decimal | None,
     longitud: Decimal | None,
 ) -> AnalisisIncidenteResponse:
+    cleaned_text_parts = _clean_texts([descripcion_texto, *texto_evidencias])
+    has_location = latitud is not None and longitud is not None
+
     provider = settings.AI_PROVIDER.strip().lower()
     attempted_provider = None
     attempted_model = None
@@ -1766,6 +1775,15 @@ def _run_incident_analysis(
         llm_result = None
 
     if llm_result is not None:
+        normalized_category = _normalize_llm_category(llm_result.clasificacion_ia)
+        requires_more_info = bool(llm_result.requiere_mas_info)
+        confidence_value = float(llm_result.confianza_clasificacion)
+        if normalized_category != INCIDENTE_INCIERTO:
+            if confidence_value >= 0.60 and has_location and cleaned_text_parts:
+                requires_more_info = False
+        else:
+            requires_more_info = True
+
         return AnalisisIncidenteResponse(
             id_incidente=id_incidente,
             clasificacion_ia=llm_result.clasificacion_ia,
@@ -1773,7 +1791,7 @@ def _run_incident_analysis(
             confianza_clasificacion=llm_result.confianza_clasificacion,
             prioridad=llm_result.prioridad,
             resumen_ia=llm_result.resumen_ia,
-            requiere_mas_info=llm_result.requiere_mas_info,
+            requiere_mas_info=requires_more_info,
             preguntas_sugeridas=llm_result.preguntas_sugeridas,
             fuente_analisis=attempted_provider or "reglas",
             modelo_analisis=attempted_model,
@@ -2167,9 +2185,7 @@ def asignar_taller_inteligentemente_service(
         if (
             not taller_activo
             or not taller_disponible
-            or not tecnico_disponible
             or not compatible_tipo_vehiculo
-            or not horario_compatible
         ):
             continue
 
@@ -2195,7 +2211,9 @@ def asignar_taller_inteligentemente_service(
         unit_score = 10.0 if (
             unidad_movil_disponible or not auxilio_compatible.tipo_auxilio.requiere_unidad_movil
         ) else 0.0
-        total_score = 35.0 + 20.0 + 15.0 + 10.0 + unit_score + distance_score
+        tecnico_score = 20.0 if tecnico_disponible else 0.0
+        horario_score = 10.0 if horario_compatible else 0.0
+        total_score = 35.0 + tecnico_score + 15.0 + horario_score + unit_score + distance_score
 
         existing_solicitud = get_solicitud_taller_by_incidente_and_taller(
             db,

@@ -14,7 +14,13 @@ from app.modules.gestion_incidentes_atencion.models import (
     SolicitudTaller,
     TipoIncidente,
 )
-from app.modules.gestion_operativa_taller_tecnico.models import Tecnico, UnidadMovil
+from app.modules.gestion_operativa_taller_tecnico.models import (
+    EspecialidadTipoAuxilio,
+    Tecnico,
+    TecnicoEspecialidad,
+    TipoAuxilio,
+    UnidadMovil,
+)
 
 
 def get_tipo_incidente_by_id(db: Session, id_tipo_incidente: int) -> TipoIncidente | None:
@@ -312,6 +318,46 @@ def get_tecnicos_disponibles_by_taller_id(db: Session, id_taller: int) -> list[T
                 Tecnico.estado == True,
             )
             .order_by(Tecnico.id_tecnico.asc())
+        ).scalars()
+    )
+
+
+def get_tipo_auxilio_by_nombre(db: Session, nombre: str) -> TipoAuxilio | None:
+    return db.execute(
+        select(TipoAuxilio).where(
+            TipoAuxilio.nombre == nombre,
+            TipoAuxilio.estado == True,
+        )
+    ).scalar_one_or_none()
+
+
+def get_tecnicos_disponibles_by_taller_id_and_tipo_auxilio(
+    db: Session,
+    *,
+    id_taller: int,
+    id_tipo_auxilio: int,
+) -> list[Tecnico]:
+    return list(
+        db.execute(
+            select(Tecnico)
+            .join(
+                TecnicoEspecialidad,
+                TecnicoEspecialidad.id_tecnico == Tecnico.id_tecnico,
+            )
+            .join(
+                EspecialidadTipoAuxilio,
+                EspecialidadTipoAuxilio.id_especialidad
+                == TecnicoEspecialidad.id_especialidad,
+            )
+            .options(joinedload(Tecnico.usuario))
+            .where(
+                Tecnico.id_taller == id_taller,
+                Tecnico.disponible == True,
+                Tecnico.estado == True,
+                EspecialidadTipoAuxilio.id_tipo_auxilio == id_tipo_auxilio,
+            )
+            .order_by(Tecnico.id_tecnico.asc())
+            .distinct()
         ).scalars()
     )
 

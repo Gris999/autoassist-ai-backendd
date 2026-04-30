@@ -107,6 +107,11 @@ class IncidenteDisponibleResponse(BaseModel):
 
     id_estado_servicio_actual: int
     estado_servicio_actual: str
+    clasificacion_ia: str | None = None
+    auxilio_sugerido: str | None = None
+    problema_detectado_ia: str | None = None
+    problema_detectado_origen: str | None = None
+    tipo_auxilio_requerido: str | None = None
 
 
 class SolicitudAtencionDetalleResponse(BaseModel):

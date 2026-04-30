@@ -46,6 +46,8 @@ from app.modules.gestion_incidentes_atencion.repository import (
     get_solicitud_taller_by_id_for_update,
     get_tecnico_by_id_for_update,
     get_tecnicos_disponibles_by_taller_id,
+    get_tecnicos_disponibles_by_taller_id_and_tipo_auxilio,
+    get_tipo_auxilio_by_nombre,
     get_tipo_incidente_by_id,
     list_tipos_incidente,
     get_unidad_movil_by_id_for_update,
@@ -96,6 +98,23 @@ ESTADOS_INCIDENTE_NO_DISPONIBLE_RESPUESTA = {
     "EN_ATENCION",
     "FINALIZADO",
     "CANCELADO",
+}
+INCIDENT_TYPE_TO_AUXILIO = {
+    "BATERIA_DESCARGADA": "AUXILIO_ELECTRICO",
+    "PINCHAZO_LLANTA": "CAMBIO_DE_LLANTA",
+    "SIN_COMBUSTIBLE": "SUMINISTRO_COMBUSTIBLE",
+    "LLAVES_DENTRO": "APERTURA_VEHICULO",
+    "FALLA_MECANICA": "AUXILIO_MECANICO_BASICO",
+    "SOBRECALENTAMIENTO": "AUXILIO_MECANICO_BASICO",
+    "ACCIDENTE_MENOR": "REMOLQUE",
+}
+CLASSIFICATION_TO_AUXILIO = {
+    "bateria": "AUXILIO_ELECTRICO",
+    "llanta": "CAMBIO_DE_LLANTA",
+    "combustible": "SUMINISTRO_COMBUSTIBLE",
+    "llave": "APERTURA_VEHICULO",
+    "motor": "AUXILIO_MECANICO_BASICO",
+    "choque": "REMOLQUE",
 }
 ALLOWED_EVIDENCIA_UPLOAD_TYPES = {
     "image/jpeg": "IMAGEN",
@@ -202,6 +221,20 @@ def _to_incidente_disponible_response(
     solicitud_taller,
 ) -> IncidenteDisponibleResponse:
     incidente = solicitud_taller.incidente
+    clasificacion_ia = incidente.clasificacion_ia
+    tipo_incidente_nombre = incidente.tipo_incidente.nombre if incidente.tipo_incidente else None
+    problema_detectado_ia = clasificacion_ia
+    problema_detectado_origen = "ia" if clasificacion_ia and clasificacion_ia.strip() else None
+    if (not problema_detectado_ia or not problema_detectado_ia.strip()) and tipo_incidente_nombre:
+        problema_detectado_ia = tipo_incidente_nombre
+        problema_detectado_origen = "fallback"
+
+    auxilio_sugerido = None
+    if clasificacion_ia and clasificacion_ia.strip():
+        auxilio_sugerido = CLASSIFICATION_TO_AUXILIO.get(clasificacion_ia.strip().lower())
+    if auxilio_sugerido is None and tipo_incidente_nombre:
+        auxilio_sugerido = INCIDENT_TYPE_TO_AUXILIO.get(tipo_incidente_nombre)
+
     return IncidenteDisponibleResponse(
         id_solicitud_taller=solicitud_taller.id_solicitud_taller,
         id_incidente=solicitud_taller.id_incidente,
@@ -224,6 +257,11 @@ def _to_incidente_disponible_response(
         prioridad=incidente.prioridad.nombre,
         id_estado_servicio_actual=incidente.id_estado_servicio_actual,
         estado_servicio_actual=incidente.estado_servicio_actual.nombre,
+        clasificacion_ia=clasificacion_ia,
+        auxilio_sugerido=auxilio_sugerido,
+        problema_detectado_ia=problema_detectado_ia,
+        problema_detectado_origen=problema_detectado_origen,
+        tipo_auxilio_requerido=auxilio_sugerido,
     )
 
 
@@ -501,6 +539,46 @@ def _infer_evidencia_tipo_for_upload(file: UploadFile) -> str:
     )
 
 
+def _resolver_tipo_auxilio_requerido_incidente(incidente) -> str | None:
+    tipo_incidente_nombre = incidente.tipo_incidente.nombre if incidente.tipo_incidente else None
+    if tipo_incidente_nombre:
+        auxilio_por_tipo = INCIDENT_TYPE_TO_AUXILIO.get(tipo_incidente_nombre)
+        if auxilio_por_tipo:
+            return auxilio_por_tipo
+    clasificacion_ia = incidente.clasificacion_ia
+    if clasificacion_ia and clasificacion_ia.strip():
+        return CLASSIFICATION_TO_AUXILIO.get(clasificacion_ia.strip().lower())
+    return None
+
+
+def _get_tecnicos_compatibles_por_incidente(
+    db: Session,
+    *,
+    id_taller: int,
+    incidente,
+):
+    auxilio_requerido = _resolver_tipo_auxilio_requerido_incidente(incidente)
+    if not auxilio_requerido:
+        return get_tecnicos_disponibles_by_taller_id(db, id_taller)
+
+    tipo_auxilio = get_tipo_auxilio_by_nombre(db, auxilio_requerido)
+    if not tipo_auxilio:
+        raise ValueError(
+            f"No existe el tipo de auxilio '{auxilio_requerido}' en la base de datos."
+        )
+
+    tecnicos = get_tecnicos_disponibles_by_taller_id_and_tipo_auxilio(
+        db,
+        id_taller=id_taller,
+        id_tipo_auxilio=tipo_auxilio.id_tipo_auxilio,
+    )
+    if not tecnicos:
+        raise ValueError(
+            "No existen tecnicos disponibles con especialidad compatible para el tipo de auxilio requerido."
+        )
+    return tecnicos
+
+
 def _build_safe_upload_filename(original_filename: str | None) -> str:
     original_extension = Path(original_filename or "").suffix.strip().lower()
     extension = original_extension if original_extension in ALLOWED_EVIDENCIA_EXTENSIONS else ""
@@ -547,32 +625,6 @@ def transcribir_audio_subido_service(*, archivo_url: str) -> AudioTranscriptionR
         archivo_url=archivo_url.strip(),
         texto_extraido=transcript,
         mensaje="Audio transcrito correctamente con Gemini.",
-    )
-
-
-def _to_incidente_disponible_response(solicitud_taller) -> IncidenteDisponibleResponse:
-    incidente = solicitud_taller.incidente
-    return IncidenteDisponibleResponse(
-        id_solicitud_taller=solicitud_taller.id_solicitud_taller,
-        id_incidente=incidente.id_incidente,
-        id_taller=solicitud_taller.id_taller,
-        titulo=incidente.titulo,
-        descripcion_texto=incidente.descripcion_texto,
-        direccion_referencia=incidente.direccion_referencia,
-        latitud=incidente.latitud,
-        longitud=incidente.longitud,
-        fecha_reporte=incidente.fecha_reporte,
-        fecha_envio=solicitud_taller.fecha_envio,
-        distancia_km=solicitud_taller.distancia_km,
-        puntaje_asignacion=solicitud_taller.puntaje_asignacion,
-        estado_solicitud=solicitud_taller.estado_solicitud,
-        id_vehiculo=incidente.id_vehiculo,
-        id_tipo_incidente=incidente.id_tipo_incidente,
-        tipo_incidente=incidente.tipo_incidente.nombre,
-        id_prioridad=incidente.id_prioridad,
-        prioridad=incidente.prioridad.nombre,
-        id_estado_servicio_actual=incidente.id_estado_servicio_actual,
-        estado_servicio_actual=incidente.estado_servicio_actual.nombre,
     )
 
 
@@ -869,12 +921,16 @@ def listar_tecnicos_disponibles_para_incidente_service(
     id_incidente: int,
 ) -> list[TecnicoDisponibleAsignacionResponse]:
     taller = _get_taller_actor_service(db, current_user)
-    _validar_incidente_aceptado_para_taller(
+    incidente = _validar_incidente_aceptado_para_taller(
         db,
         id_incidente=id_incidente,
         id_taller=taller.id_taller,
     )
-    tecnicos = get_tecnicos_disponibles_by_taller_id(db, taller.id_taller)
+    tecnicos = _get_tecnicos_compatibles_por_incidente(
+        db,
+        id_taller=taller.id_taller,
+        incidente=incidente,
+    )
     return [_to_tecnico_disponible_asignacion_response(tecnico) for tecnico in tecnicos]
 
 
@@ -934,6 +990,17 @@ def asignar_tecnico_unidad_incidente_service(
             raise ValueError("El tecnico no pertenece al taller autenticado.")
         if not tecnico.estado or not tecnico.disponible:
             raise ValueError("El tecnico seleccionado no se encuentra disponible.")
+
+        tecnicos_compatibles = _get_tecnicos_compatibles_por_incidente(
+            db,
+            id_taller=taller.id_taller,
+            incidente=incidente,
+        )
+        ids_tecnicos_compatibles = {tecnico_compatible.id_tecnico for tecnico_compatible in tecnicos_compatibles}
+        if tecnico.id_tecnico not in ids_tecnicos_compatibles:
+            raise ValueError(
+                "El tecnico seleccionado no tiene una especialidad compatible con el tipo de auxilio requerido."
+            )
 
         unidad_movil = get_unidad_movil_by_id_for_update(db, payload.id_unidad_movil)
         if not unidad_movil:

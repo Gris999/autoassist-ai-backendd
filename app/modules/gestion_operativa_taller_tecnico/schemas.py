@@ -41,7 +41,10 @@ class HorarioDisponibilidadTallerResponse(BaseModel):
 
 
 class ActualizarDisponibilidadTallerRequest(BaseModel):
-    disponible: bool = Field(description="Indicar si el taller esta disponible")
+    disponible: bool | None = Field(
+        default=None,
+        description="Indicar si el taller esta disponible",
+    )
     latitud: float | None = Field(default=None, ge=-90, le=90)
     longitud: float | None = Field(default=None, ge=-180, le=180)
     radio_cobertura_km: float | None = Field(default=None, gt=0)

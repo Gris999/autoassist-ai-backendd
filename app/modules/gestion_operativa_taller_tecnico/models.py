@@ -161,6 +161,10 @@ class Especialidad(Base):
         back_populates="especialidad",
         cascade="all, delete-orphan",
     )
+    especialidad_tipos_auxilio: Mapped[list["EspecialidadTipoAuxilio"]] = relationship(
+        back_populates="especialidad",
+        cascade="all, delete-orphan",
+    )
 
 
 class TecnicoEspecialidad(Base):
@@ -251,6 +255,10 @@ class TipoAuxilio(Base):
         back_populates="tipo_auxilio",
         cascade="all, delete-orphan",
     )
+    especialidad_tipos_auxilio: Mapped[list["EspecialidadTipoAuxilio"]] = relationship(
+        back_populates="tipo_auxilio",
+        cascade="all, delete-orphan",
+    )
 
 
 class TallerAuxilio(Base):
@@ -277,3 +285,35 @@ class TallerAuxilio(Base):
 
     taller: Mapped["Taller"] = relationship(back_populates="talleres_auxilio")
     tipo_auxilio: Mapped["TipoAuxilio"] = relationship(back_populates="talleres_auxilio")
+
+
+class EspecialidadTipoAuxilio(Base):
+    __tablename__ = "especialidad_tipo_auxilio"
+    __table_args__ = (
+        UniqueConstraint(
+            "id_especialidad",
+            "id_tipo_auxilio",
+            name="uq_especialidad_tipo_auxilio",
+        ),
+    )
+
+    id_especialidad_tipo_auxilio: Mapped[int] = mapped_column(
+        BigInteger,
+        Identity(),
+        primary_key=True,
+    )
+    id_especialidad: Mapped[int] = mapped_column(
+        ForeignKey("especialidad.id_especialidad"),
+        nullable=False,
+    )
+    id_tipo_auxilio: Mapped[int] = mapped_column(
+        ForeignKey("tipo_auxilio.id_tipo_auxilio"),
+        nullable=False,
+    )
+
+    especialidad: Mapped["Especialidad"] = relationship(
+        back_populates="especialidad_tipos_auxilio"
+    )
+    tipo_auxilio: Mapped["TipoAuxilio"] = relationship(
+        back_populates="especialidad_tipos_auxilio"
+    )

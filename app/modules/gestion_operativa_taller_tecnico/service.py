@@ -320,10 +320,14 @@ def actualizar_disponibilidad_taller_service(
         if payload.horarios is not None:
             _validar_conflictos_horarios(payload.horarios)
 
+        disponibilidad_final = (
+            payload.disponible if payload.disponible is not None else taller.disponible
+        )
+
         taller_actualizado = update_disponibilidad_taller(
             db,
             id_taller=taller.id_taller,
-            disponible=payload.disponible,
+            disponible=disponibilidad_final,
             latitud=payload.latitud,
             longitud=payload.longitud,
             radio_cobertura_km=payload.radio_cobertura_km,

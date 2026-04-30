@@ -106,18 +106,23 @@ def transcribir_audio_subido(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
-    except httpx.HTTPStatusError as e:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=(
-                "Gemini respondio con error durante la transcripcion del audio: "
-                f"{e.response.status_code}."
+    except httpx.HTTPStatusError:
+        return AudioTranscriptionResponse(
+            archivo_url=payload.archivo_url.strip(),
+            texto_extraido="",
+            mensaje=(
+                "No se pudo transcribir el audio en este momento. "
+                "La evidencia de audio fue guardada correctamente."
             ),
         )
     except httpx.HTTPError:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="No fue posible comunicarse con Gemini para transcribir el audio.",
+        return AudioTranscriptionResponse(
+            archivo_url=payload.archivo_url.strip(),
+            texto_extraido="",
+            mensaje=(
+                "No fue posible comunicarse con Gemini para transcribir el audio. "
+                "La evidencia de audio fue guardada correctamente."
+            ),
         )
 
 
