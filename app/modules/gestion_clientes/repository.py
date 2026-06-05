@@ -68,20 +68,21 @@ def get_vehiculos_by_cliente_id(db: Session, id_cliente: int) -> list[Vehiculo]:
 
 
 def get_incidentes_finalizados_pendientes_calificacion(
-    db: Session, id_cliente: int
+    db: Session,
+    id_cliente: int,
+    id_estado_finalizado: int,
 ) -> list[Incidente]:
-    # Estado finalizado: orden_flujo = 7
     from sqlalchemy import exists
+
     subquery = select(CalificacionServicio.id_calificacion).where(
         CalificacionServicio.id_incidente == Incidente.id_incidente
     )
     return list(
         db.execute(
-            select(Incidente)
-            .where(
+            select(Incidente).where(
                 Incidente.id_cliente == id_cliente,
-                Incidente.id_estado_servicio_actual == 7,  # FINALIZADO
-                ~exists(subquery),  # No existe calificación
+                Incidente.id_estado_servicio_actual == id_estado_finalizado,
+                ~exists(subquery),
             )
         ).scalars()
     )
@@ -135,9 +136,3 @@ def create_calificacion(
     db.flush()
     db.refresh(calificacion)
     return calificacion
-
-
-def get_cliente_by_usuario_id(db: Session, id_usuario: int) -> Cliente | None:
-    return db.execute(
-        select(Cliente).where(Cliente.id_usuario == id_usuario)
-    ).scalar_one_or_none()

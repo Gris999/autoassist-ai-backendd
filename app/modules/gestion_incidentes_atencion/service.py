@@ -5,7 +5,9 @@ from fastapi import UploadFile
 from sqlalchemy.orm import Session
 
 from app.core.config.settings import settings
+from app.modules.autenticacion_seguridad.repository import create_bitacora_sistema
 from app.modules.gestion_operativa_taller_tecnico.repository import (
+    get_servicios_auxilio_por_taller_id,
     get_taller_by_usuario_id,
     get_tecnico_by_usuario_id,
     get_tecnico_with_usuario_by_id,
@@ -89,6 +91,34 @@ ESTADO_ASIGNACION_SERVICIO = "ASIGNADO"
 TIPO_NOTIFICACION_TALLER_ACEPTO = "TALLER_ACEPTO"
 TIPO_NOTIFICACION_ASIGNACION_TECNICO = "ASIGNACION_TECNICO"
 ESTADOS_FINALES_SERVICIO = {"FINALIZADO", "CANCELADO"}
+TIPO_AUXILIO_POR_TIPO_INCIDENTE = {
+    "BATERIA_DESCARGADA": "AUXILIO_ELECTRICO",
+    "PINCHAZO_LLANTA": "CAMBIO_DE_LLANTA",
+    "SIN_COMBUSTIBLE": "SUMINISTRO_COMBUSTIBLE",
+    "LLAVES_DENTRO": "APERTURA_VEHICULO",
+    "FALLA_MECANICA": "AUXILIO_MECANICO_BASICO",
+    "ACCIDENTE_MENOR": "REMOLQUE",
+}
+TIPO_AUXILIO_POR_CLASIFICACION = {
+    "bateria": "AUXILIO_ELECTRICO",
+    "auxilio_electrico": "AUXILIO_ELECTRICO",
+    "llanta": "CAMBIO_DE_LLANTA",
+    "cambio_de_llanta": "CAMBIO_DE_LLANTA",
+    "combustible": "SUMINISTRO_COMBUSTIBLE",
+    "suministro_combustible": "SUMINISTRO_COMBUSTIBLE",
+    "llave": "APERTURA_VEHICULO",
+    "apertura_vehiculo": "APERTURA_VEHICULO",
+    "motor": "AUXILIO_MECANICO_BASICO",
+    "auxilio_mecanico_basico": "AUXILIO_MECANICO_BASICO",
+    "choque": "REMOLQUE",
+    "remolque": "REMOLQUE",
+    "bateria_descargada": "AUXILIO_ELECTRICO",
+    "pinchazo_llanta": "CAMBIO_DE_LLANTA",
+    "sin_combustible": "SUMINISTRO_COMBUSTIBLE",
+    "llaves_dentro": "APERTURA_VEHICULO",
+    "falla_mecanica": "AUXILIO_MECANICO_BASICO",
+    "accidente_menor": "REMOLQUE",
+}
 ESTADOS_CONSULTABLES_TECNICO = {"ASIGNADO", "EN_CAMINO", "EN_ATENCION", "FINALIZADO"}
 ESTADOS_INCIDENTE_NO_DISPONIBLE_RESPUESTA = {
     "ASIGNADO",
@@ -135,6 +165,60 @@ ALLOWED_EVIDENCIA_EXTENSIONS = {
     ".ogg": "AUDIO",
     ".webm": "AUDIO",
 }
+
+
+def _registrar_bitacora_incidente(
+    db: Session,
+    *,
+    id_usuario: int,
+    accion: str,
+    descripcion: str,
+) -> None:
+    create_bitacora_sistema(
+        db,
+        id_usuario=id_usuario,
+        accion=accion,
+        modulo="GESTION_INCIDENTES_ATENCION",
+        descripcion=descripcion,
+    )
+
+
+def _registrar_historial_evento_incidente(
+    db: Session,
+    *,
+    incidente,
+    id_usuario_actor: int,
+    detalle: str,
+    id_estado_anterior: int | None = None,
+    id_estado_nuevo: int | None = None,
+    preserve_null_previous: bool = False,
+):
+    estado_actual_id = incidente.id_estado_servicio_actual
+    return create_historial_incidente(
+        db,
+        id_incidente=incidente.id_incidente,
+        id_estado_anterior=(
+            None
+            if preserve_null_previous and id_estado_anterior is None
+            else (estado_actual_id if id_estado_anterior is None else id_estado_anterior)
+        ),
+        id_estado_nuevo=estado_actual_id if id_estado_nuevo is None else id_estado_nuevo,
+        id_usuario_actor=id_usuario_actor,
+        detalle=detalle,
+    )
+
+
+def _resolve_auxilio_name_for_incidente(incidente) -> str | None:
+    if incidente.tipo_incidente and incidente.tipo_incidente.nombre:
+        auxilio = TIPO_AUXILIO_POR_TIPO_INCIDENTE.get(
+            incidente.tipo_incidente.nombre.strip().upper()
+        )
+        if auxilio:
+            return auxilio
+    clasificacion = (incidente.clasificacion_ia or "").strip().lower()
+    if clasificacion:
+        return TIPO_AUXILIO_POR_CLASIFICACION.get(clasificacion)
+    return None
 
 
 def _get_taller_actor_service(db: Session, current_user):
@@ -269,7 +353,7 @@ def _registrar_notificacion_recursos_asignados(
         if getattr(tecnico, "usuario", None)
         else f"Tecnico #{tecnico.id_tecnico}"
     )
-    descripcion_vehiculo = unidad_movil.placa if unidad_movil else "unidad movil asignada"
+    descripcion_vehiculo = unidad_movil.placa if unidad_movil else "sin unidad movil adicional"
     detalle_tiempo = (
         f" Tiempo estimado de llegada: {tiempo_estimado_min} min."
         if tiempo_estimado_min
@@ -674,11 +758,33 @@ def report_incidente_service(
             id_incidente=incidente.id_incidente,
             evidencias_payload=payload.evidencias,
         )
+        _registrar_historial_evento_incidente(
+            db,
+            incidente=incidente,
+            id_usuario_actor=current_user.id_usuario,
+            detalle="Incidente reportado por el cliente.",
+            id_estado_anterior=None,
+            id_estado_nuevo=estado_reportado.id_estado_servicio,
+            preserve_null_previous=True,
+        )
+        _registrar_bitacora_incidente(
+            db,
+            id_usuario=current_user.id_usuario,
+            accion="CREAR_INCIDENTE",
+            descripcion=(
+                f"Creacion del incidente {incidente.id_incidente} para el vehiculo "
+                f"{payload.id_vehiculo}."
+            ),
+        )
 
         db.commit()
         db.refresh(incidente)
         try:
-            orquestar_incidente_reportado_service(db, incidente.id_incidente)
+            orquestar_incidente_reportado_service(
+                db,
+                incidente.id_incidente,
+                current_user,
+            )
             db.refresh(incidente)
         except Exception:
             if not incidente.requiere_mas_info:
@@ -764,7 +870,11 @@ def completar_informacion_incidente_service(
         db.refresh(incidente)
 
         try:
-            orquestar_incidente_reportado_service(db, incidente.id_incidente)
+            orquestar_incidente_reportado_service(
+                db,
+                incidente.id_incidente,
+                current_user,
+            )
             db.refresh(incidente)
         except Exception:
             db.refresh(incidente)
@@ -824,6 +934,7 @@ def responder_solicitud_atencion_service(
             estado_asignado = get_estado_servicio_by_nombre(db, "ASIGNADO")
             if not estado_asignado:
                 raise ValueError("No existe el estado ASIGNADO en la base de datos.")
+            estado_anterior_id = incidente.id_estado_servicio_actual
 
             update_solicitud_taller_respuesta(
                 db,
@@ -845,12 +956,40 @@ def responder_solicitud_atencion_service(
                 incidente=incidente,
                 taller=taller,
             )
+            _registrar_historial_evento_incidente(
+                db,
+                incidente=incidente,
+                id_usuario_actor=current_user.id_usuario,
+                detalle=(
+                    f"El taller {taller.nombre_taller} acepto la solicitud de atencion."
+                ),
+                id_estado_anterior=estado_anterior_id,
+                id_estado_nuevo=estado_asignado.id_estado_servicio,
+            )
         else:
             update_solicitud_taller_respuesta(
                 db,
                 solicitud_taller,
                 estado_solicitud=ESTADO_SOLICITUD_RECHAZADA,
             )
+            _registrar_historial_evento_incidente(
+                db,
+                incidente=incidente,
+                id_usuario_actor=current_user.id_usuario,
+                detalle=(
+                    f"El taller {taller.nombre_taller} rechazo la solicitud de atencion."
+                ),
+            )
+
+        _registrar_bitacora_incidente(
+            db,
+            id_usuario=current_user.id_usuario,
+            accion="RESPONDER_SOLICITUD_TALLER",
+            descripcion=(
+                f"Taller {taller.id_taller} respondio {payload.accion} a la solicitud "
+                f"{solicitud_taller.id_solicitud_taller} del incidente {incidente.id_incidente}."
+            ),
+        )
 
         db.commit()
         solicitud_taller_actualizada = get_solicitud_taller_by_id(db, solicitud_taller.id_solicitud_taller)
@@ -896,6 +1035,34 @@ def listar_unidades_moviles_disponibles_para_incidente_service(
     ]
 
 
+def _resolver_servicio_auxilio_para_incidente(
+    db: Session,
+    *,
+    incidente,
+    id_taller: int,
+):
+    auxilio_requerido = _resolve_auxilio_name_for_incidente(incidente)
+    if not auxilio_requerido:
+        raise ValueError(
+            "No se pudo determinar el auxilio real del incidente para validar la unidad movil requerida."
+        )
+
+    servicios_taller = get_servicios_auxilio_por_taller_id(db, id_taller)
+    for servicio in servicios_taller:
+        tipo_auxilio = servicio.tipo_auxilio
+        if (
+            tipo_auxilio
+            and tipo_auxilio.estado
+            and servicio.disponible
+            and tipo_auxilio.nombre.strip().upper() == auxilio_requerido
+        ):
+            return servicio
+
+    raise ValueError(
+        "El taller autenticado no tiene configurado un servicio de auxilio compatible con el incidente."
+    )
+
+
 def asignar_tecnico_unidad_incidente_service(
     db: Session,
     current_user,
@@ -935,13 +1102,29 @@ def asignar_tecnico_unidad_incidente_service(
         if not tecnico.estado or not tecnico.disponible:
             raise ValueError("El tecnico seleccionado no se encuentra disponible.")
 
-        unidad_movil = get_unidad_movil_by_id_for_update(db, payload.id_unidad_movil)
-        if not unidad_movil:
-            raise ValueError("La unidad movil especificada no existe.")
-        if unidad_movil.id_taller != taller.id_taller:
-            raise ValueError("La unidad movil no pertenece al taller autenticado.")
-        if not unidad_movil.estado or not unidad_movil.disponible:
-            raise ValueError("La unidad movil seleccionada no se encuentra disponible.")
+        servicio_auxilio = _resolver_servicio_auxilio_para_incidente(
+            db,
+            incidente=incidente,
+            id_taller=taller.id_taller,
+        )
+        requiere_unidad_movil = bool(
+            servicio_auxilio.tipo_auxilio and servicio_auxilio.tipo_auxilio.requiere_unidad_movil
+        )
+
+        unidad_movil = None
+        if requiere_unidad_movil and payload.id_unidad_movil is None:
+            raise ValueError(
+                "El auxilio real del incidente requiere una unidad movil y debe enviarse id_unidad_movil."
+            )
+
+        if payload.id_unidad_movil is not None:
+            unidad_movil = get_unidad_movil_by_id_for_update(db, payload.id_unidad_movil)
+            if not unidad_movil:
+                raise ValueError("La unidad movil especificada no existe.")
+            if unidad_movil.id_taller != taller.id_taller:
+                raise ValueError("La unidad movil no pertenece al taller autenticado.")
+            if not unidad_movil.estado or not unidad_movil.disponible:
+                raise ValueError("La unidad movil seleccionada no se encuentra disponible.")
 
         estado_asignado = get_estado_servicio_by_nombre(db, "ASIGNADO")
         if not estado_asignado:
@@ -958,14 +1141,42 @@ def asignar_tecnico_unidad_incidente_service(
             observaciones=payload.observaciones,
         )
         update_tecnico_disponibilidad(db, tecnico, disponible=False)
-        update_unidad_movil_disponibilidad(db, unidad_movil, disponible=False)
+        if unidad_movil is not None:
+            update_unidad_movil_disponibilidad(db, unidad_movil, disponible=False)
         update_incidente_estado_servicio_actual(
             db,
             incidente,
             id_estado_servicio_actual=estado_asignado.id_estado_servicio,
         )
         tecnico_detalle = get_tecnico_with_usuario_by_id(db, payload.id_tecnico)
-        unidad_movil_detalle = get_unidad_movil_by_id(db, payload.id_unidad_movil)
+        unidad_movil_detalle = (
+            get_unidad_movil_by_id(db, payload.id_unidad_movil)
+            if payload.id_unidad_movil is not None
+            else None
+        )
+        if tecnico_detalle:
+            detalle_historial = (
+                f"Se asigno el tecnico {payload.id_tecnico} al incidente "
+                f"con unidad movil {payload.id_unidad_movil}."
+                if payload.id_unidad_movil is not None
+                else f"Se asigno el tecnico {payload.id_tecnico} al incidente sin unidad movil."
+            )
+            _registrar_historial_evento_incidente(
+                db,
+                incidente=incidente,
+                id_usuario_actor=current_user.id_usuario,
+                detalle=detalle_historial,
+            )
+            _registrar_bitacora_incidente(
+                db,
+                id_usuario=current_user.id_usuario,
+                accion="ASIGNAR_RECURSOS_INCIDENTE",
+                descripcion=(
+                    f"Asignacion del tecnico {payload.id_tecnico} "
+                    f"y unidad movil {payload.id_unidad_movil if payload.id_unidad_movil is not None else 'SIN_UNIDAD_MOVIL'} "
+                    f"al incidente {id_incidente}."
+                ),
+            )
         if tecnico_detalle and unidad_movil_detalle:
             _registrar_notificacion_recursos_asignados(
                 db,
@@ -973,6 +1184,15 @@ def asignar_tecnico_unidad_incidente_service(
                 taller=taller,
                 tecnico=tecnico_detalle,
                 unidad_movil=unidad_movil_detalle,
+                tiempo_estimado_min=payload.tiempo_estimado_min,
+            )
+        elif tecnico_detalle and payload.id_unidad_movil is None:
+            _registrar_notificacion_recursos_asignados(
+                db,
+                incidente=incidente,
+                taller=taller,
+                tecnico=tecnico_detalle,
+                unidad_movil=None,
                 tiempo_estimado_min=payload.tiempo_estimado_min,
             )
 

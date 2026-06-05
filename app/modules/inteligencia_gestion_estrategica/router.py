@@ -65,8 +65,10 @@ router = APIRouter(
 )
 def analizar_incidente_manual(
     payload: AnalisisIncidenteManualRequest,
+    current_user: Usuario = Depends(require_roles("ADMIN")),
 ):
     try:
+        _ = current_user
         return analizar_incidente_manual_service(payload)
     except ValueError as exc:
         raise HTTPException(
@@ -87,13 +89,19 @@ def analizar_incidente_manual(
 )
 def analizar_incidente_por_id(
     id_incidente: int,
+    current_user: Usuario = Depends(require_roles("ADMIN", "CLIENTE")),
     db: Session = Depends(get_db),
 ):
     try:
-        return analizar_incidente_por_id_service(db, id_incidente)
+        return analizar_incidente_por_id_service(db, current_user, id_incidente)
     except IncidentNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
             detail=str(exc),
         ) from exc
     except ValueError as exc:
@@ -115,10 +123,11 @@ def analizar_incidente_por_id(
 )
 def solicitar_mas_informacion_incidente(
     id_incidente: int,
+    current_user: Usuario = Depends(require_roles("ADMIN")),
     db: Session = Depends(get_db),
 ):
     try:
-        return solicitar_mas_informacion_incidente_service(db, id_incidente)
+        return solicitar_mas_informacion_incidente_service(db, current_user, id_incidente)
     except (
         IncidentNotFoundError,
         IncidentClientNotFoundError,
@@ -126,6 +135,11 @@ def solicitar_mas_informacion_incidente(
     ) as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
             detail=str(exc),
         ) from exc
     except IncidentDoesNotRequireMoreInformationError as exc:
@@ -148,13 +162,19 @@ def solicitar_mas_informacion_incidente(
 def registrar_evidencia_procesada(
     id_incidente: int,
     payload: RegistrarEvidenciaProcesadaRequest,
+    current_user: Usuario = Depends(require_roles("ADMIN")),
     db: Session = Depends(get_db),
 ):
     try:
-        return registrar_evidencia_procesada_service(db, id_incidente, payload)
+        return registrar_evidencia_procesada_service(db, current_user, id_incidente, payload)
     except IncidentNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
             detail=str(exc),
         ) from exc
     except ValueError as exc:
@@ -176,13 +196,19 @@ def registrar_evidencia_procesada(
 )
 def listar_evidencias_procesadas_incidente(
     id_incidente: int,
+    current_user: Usuario = Depends(require_roles("ADMIN", "CLIENTE", "TALLER", "TECNICO")),
     db: Session = Depends(get_db),
 ):
     try:
-        return listar_evidencias_procesadas_incidente_service(db, id_incidente)
+        return listar_evidencias_procesadas_incidente_service(db, current_user, id_incidente)
     except IncidentNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
             detail=str(exc),
         ) from exc
     except Exception as exc:
@@ -200,13 +226,24 @@ def listar_evidencias_procesadas_incidente(
 def analizar_imagen_incidente_roboflow(
     id_incidente: int,
     payload: AnalizarImagenIncidenteRequest,
+    current_user: Usuario = Depends(require_roles("ADMIN", "CLIENTE")),
     db: Session = Depends(get_db),
 ):
     try:
-        return analizar_imagen_incidente_roboflow_service(db, id_incidente, payload)
+        return analizar_imagen_incidente_roboflow_service(
+            db,
+            current_user,
+            id_incidente,
+            payload,
+        )
     except (IncidentNotFoundError, ImageEvidenceNotFoundError) as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
             detail=str(exc),
         ) from exc
     except (RoboflowConfigurationError, ValueError) as exc:
@@ -241,13 +278,19 @@ def analizar_imagen_incidente_roboflow(
 )
 def asignar_taller_inteligente(
     id_incidente: int,
+    current_user: Usuario = Depends(require_roles("ADMIN")),
     db: Session = Depends(get_db),
 ):
     try:
-        return asignar_taller_inteligentemente_service(db, id_incidente)
+        return asignar_taller_inteligentemente_service(db, current_user, id_incidente)
     except (IncidentNotFoundError, NoCandidateTallerFoundError) as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
             detail=str(exc),
         ) from exc
     except (
@@ -307,6 +350,11 @@ def obtener_metrica_incidente(
     except IncidentNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
             detail=str(exc),
         ) from exc
     except ValueError as exc:

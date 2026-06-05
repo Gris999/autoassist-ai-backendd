@@ -168,7 +168,7 @@ class UnidadMovilDisponibleAsignacionResponse(BaseModel):
 
 class AsignacionIncidenteRequest(BaseModel):
     id_tecnico: int
-    id_unidad_movil: int
+    id_unidad_movil: int | None = None
     tiempo_estimado_min: int | None = Field(default=None, ge=0)
     observaciones: str | None = Field(default=None, max_length=2000)
 

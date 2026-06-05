@@ -45,6 +45,16 @@ def get_estado_servicio_by_nombre(db: Session, nombre: str) -> EstadoServicio | 
     ).scalar_one_or_none()
 
 
+def get_required_estado_servicio_by_nombre(
+    db: Session,
+    nombre: str,
+) -> EstadoServicio:
+    estado = get_estado_servicio_by_nombre(db, nombre)
+    if not estado:
+        raise ValueError(f"No existe el estado {nombre} en la base de datos.")
+    return estado
+
+
 def get_estado_servicio_by_id(db: Session, id_estado_servicio: int) -> EstadoServicio | None:
     return db.execute(
         select(EstadoServicio).where(

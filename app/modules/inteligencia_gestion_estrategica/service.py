@@ -10,9 +10,22 @@ from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 import httpx
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config.settings import settings
+from app.modules.autenticacion_seguridad.repository import (
+    create_bitacora_sistema,
+    get_roles_by_usuario_id,
+)
+from app.modules.gestion_clientes.repository import get_cliente_by_usuario_id
+from app.modules.gestion_operativa_taller_tecnico.repository import (
+    get_taller_by_usuario_id,
+    get_tecnico_by_usuario_id,
+)
+from app.modules.gestion_incidentes_atencion.repository import (
+    create_historial_incidente,
+)
 from app.modules.inteligencia_gestion_estrategica.commission_service import (
     CommissionAlreadyExistsError,
     CommissionConfigurationError,
@@ -317,6 +330,110 @@ class RoboflowConfigurationError(ValueError):
 
 class MetricsNotAvailableError(ValueError):
     pass
+
+
+def _resolve_actor_roles(db: Session, current_user) -> set[str]:
+    return set(get_roles_by_usuario_id(db, current_user.id_usuario))
+
+
+def _get_incidente_access_context_or_error(
+    db: Session,
+    id_incidente: int,
+):
+    incidente = get_incidente_with_assignment_context(db, id_incidente)
+    if not incidente:
+        raise IncidentNotFoundError("Incidente no encontrado.")
+    return incidente
+
+
+def _validate_incidente_ai_access(
+    db: Session,
+    current_user,
+    incidente,
+    *,
+    allow_admin: bool = False,
+    allow_cliente: bool = False,
+    allow_taller: bool = False,
+    allow_tecnico: bool = False,
+) -> set[str]:
+    if not incidente:
+        raise IncidentNotFoundError("Incidente no encontrado.")
+
+    roles = _resolve_actor_roles(db, current_user)
+
+    if allow_admin and "ADMIN" in roles:
+        return roles
+
+    if allow_cliente and "CLIENTE" in roles:
+        cliente = get_cliente_by_usuario_id(db, current_user.id_usuario)
+        if cliente and cliente.id_cliente == incidente.id_cliente:
+            return roles
+
+    if allow_taller and "TALLER" in roles:
+        taller = get_taller_by_usuario_id(db, current_user.id_usuario)
+        if taller:
+            if (
+                incidente.asignacion_servicio
+                and incidente.asignacion_servicio.id_taller == taller.id_taller
+            ):
+                return roles
+            if any(
+                solicitud.id_taller == taller.id_taller
+                and solicitud.estado_solicitud not in {"RECHAZADA", "CANCELADA"}
+                for solicitud in incidente.solicitudes_taller
+            ):
+                return roles
+
+    if allow_tecnico and "TECNICO" in roles:
+        tecnico = get_tecnico_by_usuario_id(db, current_user.id_usuario)
+        if (
+            tecnico
+            and incidente.asignacion_servicio
+            and incidente.asignacion_servicio.id_tecnico == tecnico.id_tecnico
+        ):
+            return roles
+
+    raise PermissionError(
+        "No tienes permisos para acceder al incidente solicitado desde el modulo de IA."
+    )
+
+
+def _registrar_bitacora_ia(
+    db: Session,
+    *,
+    id_usuario: int,
+    accion: str,
+    descripcion: str,
+) -> None:
+    create_bitacora_sistema(
+        db,
+        id_usuario=id_usuario,
+        accion=accion,
+        modulo="INTELIGENCIA_GESTION_ESTRATEGICA",
+        descripcion=descripcion,
+    )
+
+
+def _registrar_historial_evento_incidente(
+    db: Session,
+    *,
+    incidente,
+    id_usuario_actor: int,
+    detalle: str,
+    id_estado_anterior: int | None = None,
+    id_estado_nuevo: int | None = None,
+) -> None:
+    estado_actual_id = incidente.id_estado_servicio_actual
+    create_historial_incidente(
+        db,
+        id_incidente=incidente.id_incidente,
+        id_estado_anterior=(
+            estado_actual_id if id_estado_anterior is None else id_estado_anterior
+        ),
+        id_estado_nuevo=estado_actual_id if id_estado_nuevo is None else id_estado_nuevo,
+        id_usuario_actor=id_usuario_actor,
+        detalle=detalle,
+    )
 
 
 def _normalize_text(text: str) -> str:
@@ -1744,11 +1861,17 @@ def analizar_incidente_manual_service(
 
 def analizar_incidente_por_id_service(
     db: Session,
+    current_user,
     id_incidente: int,
 ) -> AnalisisIncidenteResponse:
-    incidente = get_incidente_by_id(db, id_incidente)
-    if not incidente:
-        raise IncidentNotFoundError("El incidente especificado no existe.")
+    incidente = _get_incidente_access_context_or_error(db, id_incidente)
+    _validate_incidente_ai_access(
+        db,
+        current_user,
+        incidente,
+        allow_admin=True,
+        allow_cliente=True,
+    )
 
     evidencia_textos = get_evidencia_textos_by_incidente_id(db, id_incidente)
     if not _clean_texts([incidente.descripcion_texto, *evidencia_textos]):
@@ -1783,6 +1906,26 @@ def analizar_incidente_por_id_service(
                 tipo_incidente.id_tipo_incidente if tipo_incidente else None
             ),
         )
+        _registrar_historial_evento_incidente(
+            db,
+            incidente=incidente,
+            id_usuario_actor=current_user.id_usuario,
+            detalle=(
+                "Analisis IA persistido para el incidente con clasificacion "
+                f"{analysis.clasificacion_ia}, confianza {analysis.confianza_clasificacion:.2f} "
+                f"y requiere_mas_info={analysis.requiere_mas_info}."
+            ),
+        )
+        _registrar_bitacora_ia(
+            db,
+            id_usuario=current_user.id_usuario,
+            accion="ANALIZAR_INCIDENTE",
+            descripcion=(
+                f"Analisis IA persistido sobre incidente {incidente.id_incidente}. "
+                f"Clasificacion={analysis.clasificacion_ia}, prioridad={analysis.prioridad}, "
+                f"requiere_mas_info={analysis.requiere_mas_info}."
+            ),
+        )
         db.commit()
         return analysis
     except Exception:
@@ -1792,11 +1935,16 @@ def analizar_incidente_por_id_service(
 
 def solicitar_mas_informacion_incidente_service(
     db: Session,
+    current_user,
     id_incidente: int,
 ) -> SolicitudMasInformacionResponse:
-    incidente = get_incidente_by_id(db, id_incidente)
-    if not incidente:
-        raise IncidentNotFoundError("Incidente no encontrado.")
+    incidente = _get_incidente_access_context_or_error(db, id_incidente)
+    _validate_incidente_ai_access(
+        db,
+        current_user,
+        incidente,
+        allow_admin=True,
+    )
 
     if not incidente.requiere_mas_info:
         raise IncidentDoesNotRequireMoreInformationError(
@@ -1854,6 +2002,23 @@ def solicitar_mas_informacion_incidente_service(
             mensaje=mensaje_notificacion,
             tipo_notificacion="SOLICITUD_MAS_INFORMACION",
         )
+        _registrar_historial_evento_incidente(
+            db,
+            incidente=incidente,
+            id_usuario_actor=current_user.id_usuario,
+            detalle=(
+                "Se emitio una solicitud de mas informacion para el incidente desde IA. "
+                f"Preguntas sugeridas: {' | '.join(preguntas_sugeridas)}"
+            ),
+        )
+        _registrar_bitacora_ia(
+            db,
+            id_usuario=current_user.id_usuario,
+            accion="SOLICITAR_MAS_INFORMACION",
+            descripcion=(
+                f"Solicitud de mas informacion emitida para incidente {incidente.id_incidente}."
+            ),
+        )
         dispatch_push_notification_service(db, notification)
         db.commit()
         return SolicitudMasInformacionResponse(
@@ -1871,12 +2036,18 @@ def solicitar_mas_informacion_incidente_service(
 
 def analizar_imagen_incidente_roboflow_service(
     db: Session,
+    current_user,
     id_incidente: int,
     payload: AnalizarImagenIncidenteRequest,
 ) -> AnalisisImagenRoboflowResponse:
-    incidente = get_incidente_by_id(db, id_incidente)
-    if not incidente:
-        raise IncidentNotFoundError("Incidente no encontrado.")
+    incidente = _get_incidente_access_context_or_error(db, id_incidente)
+    _validate_incidente_ai_access(
+        db,
+        current_user,
+        incidente,
+        allow_admin=True,
+        allow_cliente=True,
+    )
 
     evidencia_origen, archivo_url = _resolve_image_evidence_for_analysis(
         db,
@@ -1915,6 +2086,24 @@ def analizar_imagen_incidente_roboflow_service(
                 or f"Analisis visual generado por Roboflow desde evidencia de imagen del incidente."
             ),
         )
+        _registrar_historial_evento_incidente(
+            db,
+            incidente=incidente,
+            id_usuario_actor=current_user.id_usuario,
+            detalle=(
+                "Se registro evidencia procesada de imagen por IA/Roboflow "
+                f"con categoria sugerida {categoria_sugerida} y confianza {confidence:.2f}."
+            ),
+        )
+        _registrar_bitacora_ia(
+            db,
+            id_usuario=current_user.id_usuario,
+            accion="ANALIZAR_IMAGEN_INCIDENTE",
+            descripcion=(
+                f"Analisis de imagen persistido sobre incidente {incidente.id_incidente} "
+                f"desde evidencia {evidencia_origen.id_evidencia if evidencia_origen else 'sin evidencia origen explicita'}."
+            ),
+        )
         db.commit()
         return AnalisisImagenRoboflowResponse(
             id_incidente=incidente.id_incidente,
@@ -1941,12 +2130,17 @@ def analizar_imagen_incidente_roboflow_service(
 
 def registrar_evidencia_procesada_service(
     db: Session,
+    current_user,
     id_incidente: int,
     payload: RegistrarEvidenciaProcesadaRequest,
 ) -> EvidenciaProcesadaResponse:
-    incidente = get_incidente_by_id(db, id_incidente)
-    if not incidente:
-        raise IncidentNotFoundError("Incidente no encontrado.")
+    incidente = _get_incidente_access_context_or_error(db, id_incidente)
+    _validate_incidente_ai_access(
+        db,
+        current_user,
+        incidente,
+        allow_admin=True,
+    )
 
     texto_extraido = payload.texto_extraido.strip()
     if not texto_extraido:
@@ -1965,6 +2159,22 @@ def registrar_evidencia_procesada_service(
             texto_extraido=texto_extraido,
             descripcion=descripcion,
         )
+        _registrar_historial_evento_incidente(
+            db,
+            incidente=incidente,
+            id_usuario_actor=current_user.id_usuario,
+            detalle=(
+                f"Se registro evidencia procesada de tipo {tipo_evidencia} asociada al incidente."
+            ),
+        )
+        _registrar_bitacora_ia(
+            db,
+            id_usuario=current_user.id_usuario,
+            accion="REGISTRAR_EVIDENCIA_PROCESADA",
+            descripcion=(
+                f"Evidencia procesada registrada manualmente en incidente {incidente.id_incidente}."
+            ),
+        )
         db.commit()
         return _to_evidencia_procesada_response(
             evidencia,
@@ -1980,11 +2190,19 @@ def registrar_evidencia_procesada_service(
 
 def listar_evidencias_procesadas_incidente_service(
     db: Session,
+    current_user,
     id_incidente: int,
 ) -> list[EvidenciaProcesadaResponse]:
-    incidente = get_incidente_by_id(db, id_incidente)
-    if not incidente:
-        raise IncidentNotFoundError("Incidente no encontrado.")
+    incidente = _get_incidente_access_context_or_error(db, id_incidente)
+    _validate_incidente_ai_access(
+        db,
+        current_user,
+        incidente,
+        allow_admin=True,
+        allow_cliente=True,
+        allow_taller=True,
+        allow_tecnico=True,
+    )
 
     evidencias = list_evidences_by_incidente_id(db, id_incidente)
     return [
@@ -2044,6 +2262,7 @@ def transcribir_audio_desde_url_service(archivo_url: str) -> str:
 def orquestar_incidente_reportado_service(
     db: Session,
     id_incidente: int,
+    actor_user,
 ) -> dict:
     evidencias_audio = list_evidences_by_incidente_id(db, id_incidente)
     if any(_is_audio_evidence(evidencia) for evidencia in evidencias_audio):
@@ -2053,7 +2272,7 @@ def orquestar_incidente_reportado_service(
             if not settings.AI_USE_FALLBACK:
                 raise
 
-    analysis = analizar_incidente_por_id_service(db, id_incidente)
+    analysis = analizar_incidente_por_id_service(db, actor_user, id_incidente)
     result = {
         "analisis_ejecutado": True,
         "requiere_mas_info": analysis.requiere_mas_info,
@@ -2065,7 +2284,12 @@ def orquestar_incidente_reportado_service(
         return result
 
     try:
-        asignacion = asignar_taller_inteligentemente_service(db, id_incidente)
+        asignacion = asignar_taller_inteligentemente_service(
+            db,
+            actor_user,
+            id_incidente,
+            skip_access_validation=True,
+        )
         result["solicitudes_generadas"] = asignacion.total_candidatos
         result["estado_orquestacion"] = "BUSCANDO_TALLER"
     except NoCandidateTallerFoundError:
@@ -2075,9 +2299,19 @@ def orquestar_incidente_reportado_service(
 
 def asignar_taller_inteligentemente_service(
     db: Session,
+    current_user,
     id_incidente: int,
+    *,
+    skip_access_validation: bool = False,
 ) -> AsignacionInteligenteResponse:
     incidente = get_incidente_with_assignment_context(db, id_incidente)
+    if not skip_access_validation:
+        _validate_incidente_ai_access(
+            db,
+            current_user,
+            incidente,
+            allow_admin=True,
+        )
     _validate_incidente_for_intelligent_assignment(incidente)
 
     incident_lat = float(incidente.latitud)
@@ -2231,14 +2465,24 @@ def asignar_taller_inteligentemente_service(
                 puntaje_asignacion=entry["puntaje_final"],
             )
         else:
-            solicitud = create_solicitud_taller(
-                db,
-                id_incidente=incidente.id_incidente,
-                id_taller=entry["taller"].id_taller,
-                distancia_km=entry["distancia_km"],
-                puntaje_asignacion=entry["puntaje_final"],
-                estado_solicitud=ESTADO_SOLICITUD_INTELIGENTE,
-            )
+            try:
+                with db.begin_nested():
+                    solicitud = create_solicitud_taller(
+                        db,
+                        id_incidente=incidente.id_incidente,
+                        id_taller=entry["taller"].id_taller,
+                        distancia_km=entry["distancia_km"],
+                        puntaje_asignacion=entry["puntaje_final"],
+                        estado_solicitud=ESTADO_SOLICITUD_INTELIGENTE,
+                    )
+            except IntegrityError:
+                solicitud = get_solicitud_taller_by_incidente_and_taller(
+                    db,
+                    id_incidente=incidente.id_incidente,
+                    id_taller=entry["taller"].id_taller,
+                )
+                if solicitud is None:
+                    raise
 
         candidatos_registrados.append(
             _build_taller_candidate_response(
@@ -2261,6 +2505,7 @@ def asignar_taller_inteligentemente_service(
     )
 
     try:
+        estado_anterior_id = incidente.id_estado_servicio_actual
         estado_buscando_taller = get_estado_servicio_by_nombre(
             db,
             ESTADO_INCIDENTE_BUSCANDO_TALLER,
@@ -2268,6 +2513,29 @@ def asignar_taller_inteligentemente_service(
         if estado_buscando_taller:
             incidente.id_estado_servicio_actual = estado_buscando_taller.id_estado_servicio
             db.flush()
+        _registrar_historial_evento_incidente(
+            db,
+            incidente=incidente,
+            id_usuario_actor=current_user.id_usuario,
+            detalle=(
+                f"Se generaron {len(candidatos_registrados)} solicitudes de taller desde IA."
+            ),
+            id_estado_anterior=estado_anterior_id,
+            id_estado_nuevo=(
+                estado_buscando_taller.id_estado_servicio
+                if estado_buscando_taller
+                else incidente.id_estado_servicio_actual
+            ),
+        )
+        _registrar_bitacora_ia(
+            db,
+            id_usuario=current_user.id_usuario,
+            accion="ASIGNAR_TALLER_INTELIGENTE",
+            descripcion=(
+                f"Se calcularon y persistieron {len(candidatos_registrados)} candidatos "
+                f"para el incidente {incidente.id_incidente}."
+            ),
+        )
         db.commit()
     except Exception:
         db.rollback()

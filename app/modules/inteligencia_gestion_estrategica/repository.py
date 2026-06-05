@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session, joinedload
 
 from app.modules.autenticacion_seguridad.models import BitacoraSistema
@@ -333,12 +333,25 @@ def get_solicitud_taller_by_incidente_and_taller(
     id_incidente: int,
     id_taller: int,
 ) -> SolicitudTaller | None:
+    prioridad_estado = case(
+        (SolicitudTaller.estado_solicitud == "ACEPTADA", 0),
+        (SolicitudTaller.estado_solicitud == "PENDIENTE", 1),
+        else_=2,
+    )
     return db.execute(
         select(SolicitudTaller).where(
             SolicitudTaller.id_incidente == id_incidente,
             SolicitudTaller.id_taller == id_taller,
         )
-    ).scalar_one_or_none()
+        .order_by(
+            prioridad_estado.asc(),
+            func.coalesce(
+                SolicitudTaller.fecha_respuesta,
+                SolicitudTaller.fecha_envio,
+            ).desc(),
+            SolicitudTaller.id_solicitud_taller.desc(),
+        )
+    ).scalars().first()
 
 
 def create_solicitud_taller(

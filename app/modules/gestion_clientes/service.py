@@ -21,6 +21,9 @@ from app.modules.gestion_clientes.schemas import (
     VehiculoCreateRequest,
     VehiculoResponse,
 )
+from app.modules.gestion_incidentes_atencion.repository import (
+    get_required_estado_servicio_by_nombre,
+)
 
 
 def listar_tipos_vehiculo_service(db: Session) -> list[TipoVehiculoResponse]:
@@ -39,11 +42,11 @@ def register_vehiculo_service(
 
     tipo_vehiculo = get_tipo_vehiculo_by_id(db, payload.id_tipo_vehiculo)
     if not tipo_vehiculo:
-        raise ValueError("El tipo de vehículo seleccionado no existe.")
+        raise ValueError("El tipo de vehiculo seleccionado no existe.")
 
     existing_vehiculo = get_vehiculo_by_placa(db, payload.placa)
     if existing_vehiculo:
-        raise ValueError("Ya existe un vehículo registrado con esa placa.")
+        raise ValueError("Ya existe un vehiculo registrado con esa placa.")
 
     try:
         vehiculo = create_vehiculo(
@@ -87,14 +90,21 @@ def listar_servicios_pendientes_calificacion_service(
     if not cliente:
         raise ValueError("El usuario autenticado no tiene perfil de cliente.")
 
+    estado_finalizado = get_required_estado_servicio_by_nombre(db, "FINALIZADO")
     incidentes = get_incidentes_finalizados_pendientes_calificacion(
-        db, cliente.id_cliente
+        db,
+        cliente.id_cliente,
+        estado_finalizado.id_estado_servicio,
     )
     result = []
     for incidente in incidentes:
         asignacion = get_asignacion_by_incidente_id(db, incidente.id_incidente)
         if asignacion:
-            nombre_tecnico = asignacion.tecnico.usuario.nombres + " " + asignacion.tecnico.usuario.apellidos if asignacion.tecnico else None
+            nombre_tecnico = (
+                asignacion.tecnico.usuario.nombres + " " + asignacion.tecnico.usuario.apellidos
+                if asignacion.tecnico
+                else None
+            )
             result.append(
                 ServicioPendienteCalificacionResponse(
                     id_incidente=incidente.id_incidente,
@@ -118,6 +128,7 @@ def registrar_calificacion_service(
     if not cliente:
         raise ValueError("El usuario autenticado no tiene perfil de cliente.")
 
+    estado_finalizado = get_required_estado_servicio_by_nombre(db, "FINALIZADO")
     incidente = get_incidente_by_id(db, payload.id_incidente)
     if not incidente:
         raise ValueError("El incidente especificado no existe.")
@@ -125,8 +136,8 @@ def registrar_calificacion_service(
     if incidente.id_cliente != cliente.id_cliente:
         raise ValueError("El incidente no pertenece al cliente autenticado.")
 
-    if incidente.id_estado_servicio_actual != 7:  # FINALIZADO
-        raise ValueError("El servicio aún no se encuentra finalizado.")
+    if incidente.id_estado_servicio_actual != estado_finalizado.id_estado_servicio:
+        raise ValueError("El servicio aun no se encuentra finalizado.")
 
     existing_calificacion = get_calificacion_by_incidente_id(db, payload.id_incidente)
     if existing_calificacion:
@@ -134,7 +145,7 @@ def registrar_calificacion_service(
 
     asignacion = get_asignacion_by_incidente_id(db, payload.id_incidente)
     if not asignacion:
-        raise ValueError("No se encontró asignación para este incidente.")
+        raise ValueError("No se encontro asignacion para este incidente.")
 
     try:
         calificacion = create_calificacion(

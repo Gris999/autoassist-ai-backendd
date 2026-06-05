@@ -10,6 +10,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -155,6 +156,13 @@ class Evidencia(Base):
 
 class SolicitudTaller(Base):
     __tablename__ = "solicitud_taller"
+    __table_args__ = (
+        UniqueConstraint(
+            "id_incidente",
+            "id_taller",
+            name="uq_solicitud_taller_incidente_taller",
+        ),
+    )
 
     id_solicitud_taller: Mapped[int] = mapped_column(
         BigInteger,
