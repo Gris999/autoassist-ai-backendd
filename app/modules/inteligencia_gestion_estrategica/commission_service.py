@@ -8,7 +8,27 @@ from app.modules.inteligencia_gestion_estrategica.repository import (
 )
 
 COMMISSION_STATE_PENDING_SETTLEMENT = "PENDIENTE_LIQUIDACION"
+COMMISSION_STATE_OBSERVED = "OBSERVADA"
+COMMISSION_STATE_SETTLED = "LIQUIDADA"
+COMMISSION_STATE_CANCELED = "CANCELADA"
 PAYMENT_STATE_PAID = "PAGADO"
+COMMISSION_ALLOWED_TRANSITIONS = {
+    COMMISSION_STATE_PENDING_SETTLEMENT: {
+        COMMISSION_STATE_SETTLED,
+        COMMISSION_STATE_OBSERVED,
+        COMMISSION_STATE_CANCELED,
+    },
+    COMMISSION_STATE_OBSERVED: {
+        COMMISSION_STATE_SETTLED,
+        COMMISSION_STATE_CANCELED,
+    },
+}
+COMMISSION_RECALCULABLE_STATES = {COMMISSION_STATE_PENDING_SETTLEMENT}
+COMMISSION_NON_RECALCULABLE_STATES = {
+    COMMISSION_STATE_OBSERVED,
+    COMMISSION_STATE_SETTLED,
+    COMMISSION_STATE_CANCELED,
+}
 
 
 class CommissionNotFoundError(LookupError):
@@ -27,6 +47,14 @@ class CommissionConfigurationError(ValueError):
     pass
 
 
+class CommissionInvalidTransitionError(ValueError):
+    pass
+
+
+class CommissionClosedStateError(ValueError):
+    pass
+
+
 class NoCommissionEligiblePaymentsError(LookupError):
     pass
 
@@ -35,6 +63,76 @@ def decimal_amount(value) -> Decimal:
     if isinstance(value, Decimal):
         return value.quantize(Decimal("0.01"))
     return Decimal(str(value)).quantize(Decimal("0.01"))
+
+
+def _normalize_commission_state(state: str | None, *, field_name: str) -> str:
+    if state is None:
+        raise CommissionInvalidTransitionError(
+            f"El {field_name} de la comision no puede ser nulo."
+        )
+
+    normalized_state = state.strip().upper()
+    if not normalized_state:
+        raise CommissionInvalidTransitionError(
+            f"El {field_name} de la comision no puede estar vacio."
+        )
+
+    known_states = (
+        COMMISSION_RECALCULABLE_STATES
+        | COMMISSION_NON_RECALCULABLE_STATES
+    )
+    if normalized_state not in known_states:
+        raise CommissionInvalidTransitionError(
+            f"El {field_name} de la comision '{normalized_state}' no es valido."
+        )
+
+    return normalized_state
+
+
+def _validate_commission_transition(
+    current_state: str | None,
+    target_state: str | None,
+) -> tuple[str, str]:
+    normalized_current = _normalize_commission_state(
+        current_state,
+        field_name="estado origen",
+    )
+    normalized_target = _normalize_commission_state(
+        target_state,
+        field_name="estado destino",
+    )
+
+    if normalized_current == normalized_target:
+        raise CommissionInvalidTransitionError(
+            "La comision no puede transicionar al mismo estado."
+        )
+
+    allowed_transitions = COMMISSION_ALLOWED_TRANSITIONS.get(normalized_current, set())
+    if normalized_target not in allowed_transitions:
+        raise CommissionInvalidTransitionError(
+            f"La transicion de comision {normalized_current} -> {normalized_target} no esta permitida."
+        )
+
+    return normalized_current, normalized_target
+
+
+def _validate_commission_recalculation_allowed(current_state: str | None) -> str:
+    normalized_current = _normalize_commission_state(
+        current_state,
+        field_name="estado actual",
+    )
+
+    if normalized_current in COMMISSION_NON_RECALCULABLE_STATES:
+        raise CommissionClosedStateError(
+            f"La comision no puede recalcularse porque se encuentra en estado {normalized_current}."
+        )
+
+    if normalized_current not in COMMISSION_RECALCULABLE_STATES:
+        raise CommissionInvalidTransitionError(
+            f"La comision no puede recalcularse desde el estado {normalized_current}."
+        )
+
+    return normalized_current
 
 
 def get_platform_commission_percentage() -> Decimal:
@@ -83,6 +181,8 @@ def generate_platform_commission_for_payment(
         raise CommissionAlreadyExistsError(
             "Ya existe una comision registrada para el pago especificado."
         )
+    if existing_comision is not None and recalcular:
+        _validate_commission_recalculation_allowed(existing_comision.estado)
 
     taller = resolve_pago_taller(pago_servicio)
     porcentaje = get_platform_commission_percentage()
