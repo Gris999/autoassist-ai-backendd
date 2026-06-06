@@ -320,11 +320,12 @@ def seed_estados_servicio(session):
         {"nombre": "REPORTADO", "descripcion": "Incidente reportado por el cliente", "orden_flujo": 1, "estado": True},
         {"nombre": "EN_VALIDACION", "descripcion": "Incidente en validacion inicial", "orden_flujo": 2, "estado": True},
         {"nombre": "BUSCANDO_TALLER", "descripcion": "Buscando taller candidato", "orden_flujo": 3, "estado": True},
-        {"nombre": "ASIGNADO", "descripcion": "Servicio asignado a un taller/tecnico", "orden_flujo": 4, "estado": True},
-        {"nombre": "EN_CAMINO", "descripcion": "Tecnico o unidad movil en camino", "orden_flujo": 5, "estado": True},
-        {"nombre": "EN_ATENCION", "descripcion": "Incidente siendo atendido", "orden_flujo": 6, "estado": True},
-        {"nombre": "FINALIZADO", "descripcion": "Servicio finalizado", "orden_flujo": 7, "estado": True},
-        {"nombre": "CANCELADO", "descripcion": "Servicio cancelado", "orden_flujo": 8, "estado": True},
+        {"nombre": "PENDIENTE_ASIGNACION", "descripcion": "Taller acepto y falta asignar recursos", "orden_flujo": 4, "estado": True},
+        {"nombre": "ASIGNADO", "descripcion": "Servicio con tecnico y unidad movil ya asignados", "orden_flujo": 5, "estado": True},
+        {"nombre": "EN_CAMINO", "descripcion": "Tecnico o unidad movil en camino", "orden_flujo": 6, "estado": True},
+        {"nombre": "EN_ATENCION", "descripcion": "Incidente siendo atendido", "orden_flujo": 7, "estado": True},
+        {"nombre": "FINALIZADO", "descripcion": "Servicio finalizado", "orden_flujo": 8, "estado": True},
+        {"nombre": "CANCELADO", "descripcion": "Servicio cancelado", "orden_flujo": 9, "estado": True},
     ]
 
     for item in estados:
@@ -888,6 +889,7 @@ def seed_incidentes(
     estados = {
         "REPORTADO": get_by_name(session, EstadoServicio, "REPORTADO"),
         "BUSCANDO_TALLER": get_by_name(session, EstadoServicio, "BUSCANDO_TALLER"),
+        "PENDIENTE_ASIGNACION": get_by_name(session, EstadoServicio, "PENDIENTE_ASIGNACION"),
         "ASIGNADO": get_by_name(session, EstadoServicio, "ASIGNADO"),
         "EN_CAMINO": get_by_name(session, EstadoServicio, "EN_CAMINO"),
         "EN_ATENCION": get_by_name(session, EstadoServicio, "EN_ATENCION"),
@@ -1125,10 +1127,18 @@ def seed_incidentes(
         (
             incidentes["bateria_ana"],
             estados["BUSCANDO_TALLER"],
-            estados["ASIGNADO"],
+            estados["PENDIENTE_ASIGNACION"],
             usuarios["taller_electro"],
             BASE_TIME + timedelta(minutes=10),
-            "Taller Electro Sur acepta la solicitud.",
+            "Taller Electro Sur acepta la solicitud y queda pendiente la asignacion de recursos.",
+        ),
+        (
+            incidentes["bateria_ana"],
+            estados["PENDIENTE_ASIGNACION"],
+            estados["ASIGNADO"],
+            usuarios["taller_electro"],
+            BASE_TIME + timedelta(minutes=12),
+            "Taller Electro Sur asigna tecnico y unidad movil al incidente.",
         ),
         (
             incidentes["bateria_ana"],
@@ -1173,10 +1183,18 @@ def seed_incidentes(
         (
             incidentes["llanta_luis"],
             estados["BUSCANDO_TALLER"],
-            estados["ASIGNADO"],
+            estados["PENDIENTE_ASIGNACION"],
             usuarios["taller_okenan"],
             BASE_TIME + timedelta(hours=2, minutes=12),
-            "Taller Okenan acepta la atencion.",
+            "Taller Okenan acepta la atencion y queda pendiente la asignacion de recursos.",
+        ),
+        (
+            incidentes["llanta_luis"],
+            estados["PENDIENTE_ASIGNACION"],
+            estados["ASIGNADO"],
+            usuarios["taller_okenan"],
+            BASE_TIME + timedelta(hours=2, minutes=14),
+            "Taller Okenan asigna tecnico y unidad movil para la atencion.",
         ),
         (
             incidentes["llanta_luis"],

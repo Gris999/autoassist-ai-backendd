@@ -814,16 +814,18 @@ def seed_expanded_demo_data(session):
         asignaciones[code] = asignacion
 
     history_templates = {
-        "FINALIZADO": ["REPORTADO", "BUSCANDO_TALLER", "ASIGNADO", "EN_CAMINO", "EN_ATENCION", "FINALIZADO"],
-        "EN_ATENCION": ["REPORTADO", "BUSCANDO_TALLER", "ASIGNADO", "EN_CAMINO", "EN_ATENCION"],
-        "EN_CAMINO": ["REPORTADO", "BUSCANDO_TALLER", "ASIGNADO", "EN_CAMINO"],
-        "ASIGNADO": ["REPORTADO", "BUSCANDO_TALLER", "ASIGNADO"],
+        "FINALIZADO": ["REPORTADO", "BUSCANDO_TALLER", "PENDIENTE_ASIGNACION", "ASIGNADO", "EN_CAMINO", "EN_ATENCION", "FINALIZADO"],
+        "EN_ATENCION": ["REPORTADO", "BUSCANDO_TALLER", "PENDIENTE_ASIGNACION", "ASIGNADO", "EN_CAMINO", "EN_ATENCION"],
+        "EN_CAMINO": ["REPORTADO", "BUSCANDO_TALLER", "PENDIENTE_ASIGNACION", "ASIGNADO", "EN_CAMINO"],
+        "ASIGNADO": ["REPORTADO", "BUSCANDO_TALLER", "PENDIENTE_ASIGNACION", "ASIGNADO"],
+        "PENDIENTE_ASIGNACION": ["REPORTADO", "BUSCANDO_TALLER", "PENDIENTE_ASIGNACION"],
         "BUSCANDO_TALLER": ["REPORTADO", "BUSCANDO_TALLER"],
         "REPORTADO": ["REPORTADO"],
     }
     actor_for_state = {
         "REPORTADO": lambda code: clientes[next(k for k, c in clientes.items() if c.id_cliente == incidentes[code].id_cliente)],
         "BUSCANDO_TALLER": lambda code: usuarios["demo_taller"],
+        "PENDIENTE_ASIGNACION": lambda code: usuarios["demo_taller"],
         "ASIGNADO": lambda code: usuarios["demo_taller"],
         "EN_CAMINO": lambda code: usuarios["tecnico_juan"],
         "EN_ATENCION": lambda code: usuarios["tecnico_juan"],
@@ -832,7 +834,8 @@ def seed_expanded_demo_data(session):
     detalle_for_state = {
         "REPORTADO": "Cliente reporta el incidente desde la app movil.",
         "BUSCANDO_TALLER": "El sistema analiza el incidente y busca talleres compatibles.",
-        "ASIGNADO": "Un taller acepta la solicitud y toma el caso.",
+        "PENDIENTE_ASIGNACION": "Un taller acepta la solicitud y el incidente queda pendiente de asignacion de recursos.",
+        "ASIGNADO": "El taller asigna tecnico y, si corresponde, unidad movil al incidente.",
         "EN_CAMINO": "Tecnico y unidad movil salen rumbo al incidente.",
         "EN_ATENCION": "Se inicia la atencion del incidente en sitio.",
         "FINALIZADO": "El servicio queda resuelto y listo para pago/calificacion.",

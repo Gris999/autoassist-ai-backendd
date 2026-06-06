@@ -87,6 +87,8 @@ ESTADO_SOLICITUD_PENDIENTE = "PENDIENTE"
 ESTADO_SOLICITUD_ACEPTADA = "ACEPTADA"
 ESTADO_SOLICITUD_RECHAZADA = "RECHAZADA"
 ESTADO_SOLICITUD_CANCELADA = "CANCELADA"
+ESTADO_INCIDENTE_PENDIENTE_ASIGNACION = "PENDIENTE_ASIGNACION"
+ESTADO_INCIDENTE_ASIGNADO = "ASIGNADO"
 ESTADO_ASIGNACION_SERVICIO = "ASIGNADO"
 TIPO_NOTIFICACION_TALLER_ACEPTO = "TALLER_ACEPTO"
 TIPO_NOTIFICACION_ASIGNACION_TECNICO = "ASIGNACION_TECNICO"
@@ -121,6 +123,7 @@ TIPO_AUXILIO_POR_CLASIFICACION = {
 }
 ESTADOS_CONSULTABLES_TECNICO = {"ASIGNADO", "EN_CAMINO", "EN_ATENCION", "FINALIZADO"}
 ESTADOS_INCIDENTE_NO_DISPONIBLE_RESPUESTA = {
+    "PENDIENTE_ASIGNACION",
     "ASIGNADO",
     "EN_CAMINO",
     "EN_ATENCION",
@@ -477,7 +480,7 @@ def _validar_incidente_aceptado_para_taller(db: Session, *, id_incidente: int, i
     if solicitud_aceptada.id_taller != id_taller:
         raise ValueError("El incidente no corresponde al taller autenticado.")
 
-    if incidente.estado_servicio_actual.nombre != "ASIGNADO":
+    if incidente.estado_servicio_actual.nombre != ESTADO_INCIDENTE_PENDIENTE_ASIGNACION:
         raise ValueError("El incidente no se encuentra en un estado apto para asignacion.")
 
     asignacion_existente = get_asignacion_servicio_by_incidente_id(db, id_incidente)
@@ -931,9 +934,14 @@ def responder_solicitud_atencion_service(
             raise ValueError("La solicitud ya fue tomada por otro taller.")
 
         if payload.accion == "aceptar":
-            estado_asignado = get_estado_servicio_by_nombre(db, "ASIGNADO")
-            if not estado_asignado:
-                raise ValueError("No existe el estado ASIGNADO en la base de datos.")
+            estado_pendiente_asignacion = get_estado_servicio_by_nombre(
+                db,
+                ESTADO_INCIDENTE_PENDIENTE_ASIGNACION,
+            )
+            if not estado_pendiente_asignacion:
+                raise ValueError(
+                    "No existe el estado PENDIENTE_ASIGNACION en la base de datos."
+                )
             estado_anterior_id = incidente.id_estado_servicio_actual
 
             update_solicitud_taller_respuesta(
@@ -944,7 +952,7 @@ def responder_solicitud_atencion_service(
             update_incidente_estado_servicio_actual(
                 db,
                 incidente,
-                id_estado_servicio_actual=estado_asignado.id_estado_servicio,
+                id_estado_servicio_actual=estado_pendiente_asignacion.id_estado_servicio,
             )
             cancel_pending_solicitudes_by_incidente_except(
                 db,
@@ -961,10 +969,11 @@ def responder_solicitud_atencion_service(
                 incidente=incidente,
                 id_usuario_actor=current_user.id_usuario,
                 detalle=(
-                    f"El taller {taller.nombre_taller} acepto la solicitud de atencion."
+                    f"El taller {taller.nombre_taller} acepto la solicitud y el incidente "
+                    "quedo pendiente de asignacion de recursos."
                 ),
                 id_estado_anterior=estado_anterior_id,
-                id_estado_nuevo=estado_asignado.id_estado_servicio,
+                id_estado_nuevo=estado_pendiente_asignacion.id_estado_servicio,
             )
         else:
             update_solicitud_taller_respuesta(
@@ -1087,7 +1096,7 @@ def asignar_tecnico_unidad_incidente_service(
                 raise ValueError("El incidente fue aceptado por otro taller.")
             raise ValueError("El incidente no fue aceptado previamente por el taller autenticado.")
 
-        if incidente.estado_servicio_actual.nombre != "ASIGNADO":
+        if incidente.estado_servicio_actual.nombre != ESTADO_INCIDENTE_PENDIENTE_ASIGNACION:
             raise ValueError("El incidente no se encuentra en un estado apto para asignacion.")
 
         asignacion_existente = get_asignacion_servicio_by_incidente_id_for_update(db, id_incidente)
@@ -1126,9 +1135,10 @@ def asignar_tecnico_unidad_incidente_service(
             if not unidad_movil.estado or not unidad_movil.disponible:
                 raise ValueError("La unidad movil seleccionada no se encuentra disponible.")
 
-        estado_asignado = get_estado_servicio_by_nombre(db, "ASIGNADO")
+        estado_asignado = get_estado_servicio_by_nombre(db, ESTADO_INCIDENTE_ASIGNADO)
         if not estado_asignado:
             raise ValueError("No existe el estado ASIGNADO en la base de datos.")
+        estado_anterior_id = incidente.id_estado_servicio_actual
 
         asignacion = create_asignacion_servicio(
             db,
@@ -1166,6 +1176,8 @@ def asignar_tecnico_unidad_incidente_service(
                 incidente=incidente,
                 id_usuario_actor=current_user.id_usuario,
                 detalle=detalle_historial,
+                id_estado_anterior=estado_anterior_id,
+                id_estado_nuevo=estado_asignado.id_estado_servicio,
             )
             _registrar_bitacora_incidente(
                 db,

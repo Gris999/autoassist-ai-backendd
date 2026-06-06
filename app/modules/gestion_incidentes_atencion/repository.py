@@ -165,7 +165,14 @@ def get_solicitudes_taller_disponibles(db: Session, id_taller: int) -> list[Soli
             SolicitudTaller.id_taller == id_taller,
             SolicitudTaller.estado_solicitud == "PENDIENTE",
             EstadoServicio.nombre.notin_(
-                ["ASIGNADO", "EN_CAMINO", "EN_ATENCION", "FINALIZADO", "CANCELADO"]
+                [
+                    "PENDIENTE_ASIGNACION",
+                    "ASIGNADO",
+                    "EN_CAMINO",
+                    "EN_ATENCION",
+                    "FINALIZADO",
+                    "CANCELADO",
+                ]
             ),
         )
         .order_by(SolicitudTaller.fecha_envio.desc())
