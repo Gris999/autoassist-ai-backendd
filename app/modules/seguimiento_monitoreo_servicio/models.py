@@ -160,9 +160,53 @@ class ComisionPlataforma(Base):
         default=datetime.utcnow,
     )
     estado: Mapped[str] = mapped_column(String(50), nullable=False)
+    fecha_liquidacion: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    observacion_estado: Mapped[str | None] = mapped_column(Text, nullable=True)
+    referencia_liquidacion: Mapped[str | None] = mapped_column(
+        String(150),
+        nullable=True,
+    )
+    id_usuario_ultima_accion: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("usuario.id_usuario"),
+        nullable=True,
+    )
+    fecha_ultima_accion: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     pago_servicio: Mapped["PagoServicio"] = relationship(back_populates="comision_plataforma")
     taller = relationship("Taller")
+    historial: Mapped[list["HistorialComisionPlataforma"]] = relationship(
+        back_populates="comision",
+        cascade="all, delete-orphan",
+        order_by="HistorialComisionPlataforma.fecha_hora",
+    )
+
+
+class HistorialComisionPlataforma(Base):
+    __tablename__ = "historial_comision_plataforma"
+
+    id_historial_comision: Mapped[int] = mapped_column(
+        BigInteger,
+        Identity(),
+        primary_key=True,
+    )
+    id_comision: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("comision_plataforma.id_comision"),
+        nullable=False,
+    )
+    estado_anterior: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    estado_nuevo: Mapped[str] = mapped_column(String(50), nullable=False)
+    observacion: Mapped[str | None] = mapped_column(Text, nullable=True)
+    referencia: Mapped[str | None] = mapped_column(String(150), nullable=True)
+    id_usuario_actor: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("usuario.id_usuario"),
+        nullable=False,
+    )
+    fecha_hora: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+    comision: Mapped["ComisionPlataforma"] = relationship(back_populates="historial")
 
 
 class CalificacionServicio(Base):
