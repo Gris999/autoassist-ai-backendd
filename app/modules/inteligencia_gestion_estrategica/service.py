@@ -380,7 +380,7 @@ def _validate_incidente_ai_access(
                 return roles
             if any(
                 solicitud.id_taller == taller.id_taller
-                and solicitud.estado_solicitud not in {"RECHAZADA", "CANCELADA"}
+                and solicitud.estado_solicitud == "ACEPTADA"
                 for solicitud in incidente.solicitudes_taller
             ):
                 return roles
