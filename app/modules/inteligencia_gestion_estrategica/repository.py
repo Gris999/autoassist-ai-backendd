@@ -1,7 +1,7 @@
 from datetime import datetime
 
 from sqlalchemy import case, func, select
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.modules.autenticacion_seguridad.models import BitacoraSistema
 from app.modules.autenticacion_seguridad.models import Usuario
@@ -27,6 +27,7 @@ from app.modules.gestion_operativa_taller_tecnico.models import (
 from app.modules.seguimiento_monitoreo_servicio.models import (
     ComisionPlataforma,
     DetallePago,
+    HistorialComisionPlataforma,
     MetricaIncidente,
     Notificacion,
     PagoServicio,
@@ -435,6 +436,50 @@ def get_comision_plataforma_by_id(
     ).unique().scalar_one_or_none()
 
 
+def get_comision_plataforma_by_id_for_update(
+    db: Session,
+    id_comision: int,
+) -> ComisionPlataforma | None:
+    return db.execute(
+        select(ComisionPlataforma)
+        .options(
+            joinedload(ComisionPlataforma.pago_servicio)
+            .joinedload(PagoServicio.detalles_pago)
+            .joinedload(DetallePago.taller_auxilio)
+            .joinedload(TallerAuxilio.tipo_auxilio),
+            joinedload(ComisionPlataforma.pago_servicio)
+            .joinedload(PagoServicio.incidente)
+            .joinedload(Incidente.asignacion_servicio)
+            .joinedload(AsignacionServicio.taller.of_type(Taller)),
+            joinedload(ComisionPlataforma.taller),
+        )
+        .where(ComisionPlataforma.id_comision == id_comision)
+        .with_for_update()
+    ).unique().scalar_one_or_none()
+
+
+def get_comision_plataforma_by_id_with_history(
+    db: Session,
+    id_comision: int,
+) -> ComisionPlataforma | None:
+    return db.execute(
+        select(ComisionPlataforma)
+        .options(
+            joinedload(ComisionPlataforma.pago_servicio)
+            .joinedload(PagoServicio.detalles_pago)
+            .joinedload(DetallePago.taller_auxilio)
+            .joinedload(TallerAuxilio.tipo_auxilio),
+            joinedload(ComisionPlataforma.pago_servicio)
+            .joinedload(PagoServicio.incidente)
+            .joinedload(Incidente.asignacion_servicio)
+            .joinedload(AsignacionServicio.taller.of_type(Taller)),
+            joinedload(ComisionPlataforma.taller),
+            selectinload(ComisionPlataforma.historial),
+        )
+        .where(ComisionPlataforma.id_comision == id_comision)
+    ).unique().scalar_one_or_none()
+
+
 def list_comisiones_plataforma(
     db: Session,
     *,
@@ -512,6 +557,55 @@ def create_bitacora_comision(
     db.flush()
     db.refresh(bitacora)
     return bitacora
+
+
+def update_comision_plataforma_estado_operativo(
+    db: Session,
+    comision: ComisionPlataforma,
+    *,
+    estado_nuevo: str,
+    id_usuario_actor: int,
+    observacion: str | None = None,
+    referencia: str | None = None,
+    fecha_accion: datetime | None = None,
+    fecha_liquidacion: datetime | None = None,
+) -> ComisionPlataforma:
+    comision.estado = estado_nuevo
+    comision.observacion_estado = observacion
+    comision.referencia_liquidacion = referencia
+    comision.id_usuario_ultima_accion = id_usuario_actor
+    comision.fecha_ultima_accion = fecha_accion or datetime.utcnow()
+    if fecha_liquidacion is not None:
+        comision.fecha_liquidacion = fecha_liquidacion
+    db.flush()
+    db.refresh(comision)
+    return comision
+
+
+def create_historial_comision_plataforma(
+    db: Session,
+    *,
+    id_comision: int,
+    estado_anterior: str | None,
+    estado_nuevo: str,
+    id_usuario_actor: int,
+    observacion: str | None = None,
+    referencia: str | None = None,
+    fecha_hora: datetime | None = None,
+) -> HistorialComisionPlataforma:
+    historial = HistorialComisionPlataforma(
+        id_comision=id_comision,
+        estado_anterior=estado_anterior,
+        estado_nuevo=estado_nuevo,
+        observacion=observacion,
+        referencia=referencia,
+        id_usuario_actor=id_usuario_actor,
+        fecha_hora=fecha_hora or datetime.utcnow(),
+    )
+    db.add(historial)
+    db.flush()
+    db.refresh(historial)
+    return historial
 
 
 def upsert_comision_plataforma_inteligencia(
