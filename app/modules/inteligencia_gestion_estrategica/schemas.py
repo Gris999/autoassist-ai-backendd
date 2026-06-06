@@ -1,7 +1,7 @@
 from datetime import datetime
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class AnalisisIncidenteManualRequest(BaseModel):
@@ -167,6 +167,70 @@ class ComisionPlataformaGenerateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class LiquidarComisionRequest(BaseModel):
+    referencia_liquidacion: str | None = None
+    observacion: str | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("referencia_liquidacion", "observacion", mode="before")
+    @classmethod
+    def _normalize_optional_text(cls, value):
+        if value is None:
+            return None
+        if isinstance(value, str):
+            normalized = value.strip()
+            return normalized or None
+        return value
+
+
+class ObservarComisionRequest(BaseModel):
+    observacion: str
+
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("observacion", mode="before")
+    @classmethod
+    def _validate_required_observacion(cls, value):
+        if value is None:
+            raise ValueError("La observacion es obligatoria.")
+        if isinstance(value, str):
+            normalized = value.strip()
+            if not normalized:
+                raise ValueError("La observacion no puede estar vacia.")
+            return normalized
+        return value
+
+
+class CancelarComisionRequest(BaseModel):
+    observacion: str
+
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("observacion", mode="before")
+    @classmethod
+    def _validate_required_observacion(cls, value):
+        if value is None:
+            raise ValueError("La observacion es obligatoria.")
+        if isinstance(value, str):
+            normalized = value.strip()
+            if not normalized:
+                raise ValueError("La observacion no puede estar vacia.")
+            return normalized
+        return value
+
+
+class HistorialComisionPlataformaResponse(BaseModel):
+    id_historial_comision: int
+    id_comision: int
+    estado_anterior: str | None = None
+    estado_nuevo: str
+    observacion: str | None = None
+    referencia: str | None = None
+    id_usuario_actor: int
+    fecha_hora: datetime
+
+
 class ComisionPlataformaListResponse(BaseModel):
     id_comision: int
     id_pago_servicio: int
@@ -182,6 +246,11 @@ class ComisionPlataformaListResponse(BaseModel):
     fecha_pago: datetime | None = None
     fecha_calculo: datetime
     referencia_transaccion: str | None = None
+    fecha_liquidacion: datetime | None = None
+    observacion_estado: str | None = None
+    referencia_liquidacion: str | None = None
+    id_usuario_ultima_accion: int | None = None
+    fecha_ultima_accion: datetime | None = None
 
 
 class ComisionDetallePagoResponse(BaseModel):
@@ -197,6 +266,7 @@ class ComisionDetallePagoResponse(BaseModel):
 class ComisionPlataformaDetailResponse(ComisionPlataformaListResponse):
     metodo_pago: str
     detalles_pago: list[ComisionDetallePagoResponse] = Field(default_factory=list)
+    historial: list[HistorialComisionPlataformaResponse] = Field(default_factory=list)
 
 
 class ComisionPlataformaGenerateItemResponse(BaseModel):
