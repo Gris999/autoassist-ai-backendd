@@ -30,18 +30,24 @@ from app.modules.inteligencia_gestion_estrategica.commission_service import (
     CommissionAlreadyExistsError,
     CommissionConfigurationError,
     CommissionNotFoundError,
+    COMMISSION_STATE_CANCELED,
+    COMMISSION_STATE_OBSERVED,
+    COMMISSION_STATE_SETTLED,
     NoCommissionEligiblePaymentsError,
     PaymentNotEligibleForCommissionError,
+    _validate_commission_transition,
     decimal_amount as commission_decimal_amount,
     generate_platform_commission_for_payment,
     resolve_pago_taller,
 )
 from app.modules.inteligencia_gestion_estrategica.repository import (
+    create_historial_comision_plataforma,
     create_solicitud_taller,
     create_processed_evidence,
     create_notification,
     get_cliente_by_id,
     get_comision_plataforma_by_id,
+    get_comision_plataforma_by_id_for_update,
     get_evidencia_by_id_and_incidente_id,
     get_evidencia_textos_by_incidente_id,
     get_estado_servicio_by_nombre,
@@ -62,6 +68,7 @@ from app.modules.inteligencia_gestion_estrategica.repository import (
     list_available_talleres_with_resources,
     list_evidences_by_incidente_id,
     upsert_metrica_incidente,
+    update_comision_plataforma_estado_operativo,
     update_evidencia_texto_extraido,
     update_solicitud_taller_candidate_data,
     update_incidente_analysis_result,
@@ -2676,6 +2683,158 @@ def obtener_comision_plataforma_service(
     if not comision:
         raise CommissionNotFoundError("La comision especificada no existe.")
     return _to_comision_detail_response(comision)
+
+
+def _assert_admin_role_for_comision_action(db: Session, current_user) -> None:
+    roles = set(get_roles_by_usuario_id(db, current_user.id_usuario))
+    if "ADMIN" not in roles:
+        raise PermissionError(
+            "Solo un usuario con rol ADMIN puede gestionar el ciclo administrativo de comisiones."
+        )
+
+
+def _normalize_required_comision_observacion(observacion: str | None) -> str:
+    if observacion is None:
+        raise ValueError("La observacion es obligatoria para esta accion sobre la comision.")
+    observacion_normalizada = observacion.strip()
+    if not observacion_normalizada:
+        raise ValueError("La observacion no puede estar vacia para esta accion sobre la comision.")
+    return observacion_normalizada
+
+
+def liquidar_comision_plataforma_service(
+    db: Session,
+    id_comision: int,
+    current_user,
+    referencia_liquidacion: str | None = None,
+    observacion: str | None = None,
+):
+    _assert_admin_role_for_comision_action(db, current_user)
+
+    try:
+        comision = get_comision_plataforma_by_id_for_update(db, id_comision)
+        if not comision:
+            raise CommissionNotFoundError("La comision especificada no existe.")
+
+        estado_anterior = comision.estado
+        _validate_commission_transition(estado_anterior, COMMISSION_STATE_SETTLED)
+        ahora = datetime.utcnow()
+
+        comision_actualizada = update_comision_plataforma_estado_operativo(
+            db,
+            comision,
+            estado_nuevo=COMMISSION_STATE_SETTLED,
+            id_usuario_actor=current_user.id_usuario,
+            observacion=observacion,
+            referencia=referencia_liquidacion,
+            fecha_accion=ahora,
+            fecha_liquidacion=ahora,
+        )
+        create_historial_comision_plataforma(
+            db,
+            id_comision=comision_actualizada.id_comision,
+            estado_anterior=estado_anterior,
+            estado_nuevo=COMMISSION_STATE_SETTLED,
+            observacion=observacion,
+            referencia=referencia_liquidacion,
+            id_usuario_actor=current_user.id_usuario,
+            fecha_hora=ahora,
+        )
+        db.commit()
+        return comision_actualizada
+    except Exception:
+        db.rollback()
+        raise
+
+
+def observar_comision_plataforma_service(
+    db: Session,
+    id_comision: int,
+    current_user,
+    observacion: str,
+):
+    _assert_admin_role_for_comision_action(db, current_user)
+    observacion_normalizada = _normalize_required_comision_observacion(observacion)
+
+    try:
+        comision = get_comision_plataforma_by_id_for_update(db, id_comision)
+        if not comision:
+            raise CommissionNotFoundError("La comision especificada no existe.")
+
+        estado_anterior = comision.estado
+        _validate_commission_transition(estado_anterior, COMMISSION_STATE_OBSERVED)
+        ahora = datetime.utcnow()
+        referencia_existente = comision.referencia_liquidacion
+
+        comision_actualizada = update_comision_plataforma_estado_operativo(
+            db,
+            comision,
+            estado_nuevo=COMMISSION_STATE_OBSERVED,
+            id_usuario_actor=current_user.id_usuario,
+            observacion=observacion_normalizada,
+            referencia=referencia_existente,
+            fecha_accion=ahora,
+        )
+        create_historial_comision_plataforma(
+            db,
+            id_comision=comision_actualizada.id_comision,
+            estado_anterior=estado_anterior,
+            estado_nuevo=COMMISSION_STATE_OBSERVED,
+            observacion=observacion_normalizada,
+            referencia=referencia_existente,
+            id_usuario_actor=current_user.id_usuario,
+            fecha_hora=ahora,
+        )
+        db.commit()
+        return comision_actualizada
+    except Exception:
+        db.rollback()
+        raise
+
+
+def cancelar_comision_plataforma_service(
+    db: Session,
+    id_comision: int,
+    current_user,
+    observacion: str,
+):
+    _assert_admin_role_for_comision_action(db, current_user)
+    observacion_normalizada = _normalize_required_comision_observacion(observacion)
+
+    try:
+        comision = get_comision_plataforma_by_id_for_update(db, id_comision)
+        if not comision:
+            raise CommissionNotFoundError("La comision especificada no existe.")
+
+        estado_anterior = comision.estado
+        _validate_commission_transition(estado_anterior, COMMISSION_STATE_CANCELED)
+        ahora = datetime.utcnow()
+        referencia_existente = comision.referencia_liquidacion
+
+        comision_actualizada = update_comision_plataforma_estado_operativo(
+            db,
+            comision,
+            estado_nuevo=COMMISSION_STATE_CANCELED,
+            id_usuario_actor=current_user.id_usuario,
+            observacion=observacion_normalizada,
+            referencia=referencia_existente,
+            fecha_accion=ahora,
+        )
+        create_historial_comision_plataforma(
+            db,
+            id_comision=comision_actualizada.id_comision,
+            estado_anterior=estado_anterior,
+            estado_nuevo=COMMISSION_STATE_CANCELED,
+            observacion=observacion_normalizada,
+            referencia=referencia_existente,
+            id_usuario_actor=current_user.id_usuario,
+            fecha_hora=ahora,
+        )
+        db.commit()
+        return comision_actualizada
+    except Exception:
+        db.rollback()
+        raise
 
 
 def generar_comisiones_plataforma_service(
