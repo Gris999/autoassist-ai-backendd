@@ -11,15 +11,21 @@ from app.modules.inteligencia_gestion_estrategica.schemas import (
     AnalisisIncidenteManualRequest,
     AnalisisIncidenteResponse,
     AsignacionInteligenteResponse,
+    CancelarComisionRequest,
     ComisionPlataformaDetailResponse,
     ComisionPlataformaGenerateRequest,
     ComisionPlataformaGenerateResponse,
     ComisionPlataformaListResponse,
     EvidenciaProcesadaResponse,
+    LiquidarComisionRequest,
     MetricaIncidenteDetailResponse,
     MetricaIncidenteListResponse,
+    ObservarComisionRequest,
     RegistrarEvidenciaProcesadaRequest,
     SolicitudMasInformacionResponse,
+)
+from app.modules.inteligencia_gestion_estrategica.commission_service import (
+    CommissionInvalidTransitionError,
 )
 from app.modules.inteligencia_gestion_estrategica.service import (
     IncidentClassificationInsufficientError,
@@ -47,8 +53,11 @@ from app.modules.inteligencia_gestion_estrategica.service import (
     asignar_taller_inteligentemente_service,
     analizar_incidente_manual_service,
     analizar_incidente_por_id_service,
+    cancelar_comision_plataforma_service,
+    liquidar_comision_plataforma_service,
     listar_evidencias_procesadas_incidente_service,
     registrar_evidencia_procesada_service,
+    observar_comision_plataforma_service,
     solicitar_mas_informacion_incidente_service,
 )
 
@@ -462,4 +471,125 @@ def generar_comisiones_plataforma(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Ocurrio un error inesperado al generar las comisiones de la plataforma.",
+        ) from exc
+
+
+@router.post(
+    "/comisiones/{id_comision}/liquidar",
+    response_model=ComisionPlataformaDetailResponse,
+    status_code=status.HTTP_200_OK,
+)
+def liquidar_comision_plataforma(
+    id_comision: int,
+    payload: LiquidarComisionRequest,
+    current_user: Usuario = Depends(require_roles("ADMIN")),
+    db: Session = Depends(get_db),
+):
+    try:
+        return liquidar_comision_plataforma_service(
+            db,
+            id_comision,
+            current_user,
+            referencia_liquidacion=payload.referencia_liquidacion,
+            observacion=payload.observacion,
+        )
+    except CommissionNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(exc),
+        ) from exc
+    except (CommissionInvalidTransitionError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Ocurrio un error inesperado al liquidar la comision.",
+        ) from exc
+
+
+@router.post(
+    "/comisiones/{id_comision}/observar",
+    response_model=ComisionPlataformaDetailResponse,
+    status_code=status.HTTP_200_OK,
+)
+def observar_comision_plataforma(
+    id_comision: int,
+    payload: ObservarComisionRequest,
+    current_user: Usuario = Depends(require_roles("ADMIN")),
+    db: Session = Depends(get_db),
+):
+    try:
+        return observar_comision_plataforma_service(
+            db,
+            id_comision,
+            current_user,
+            observacion=payload.observacion,
+        )
+    except CommissionNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(exc),
+        ) from exc
+    except (CommissionInvalidTransitionError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Ocurrio un error inesperado al observar la comision.",
+        ) from exc
+
+
+@router.post(
+    "/comisiones/{id_comision}/cancelar",
+    response_model=ComisionPlataformaDetailResponse,
+    status_code=status.HTTP_200_OK,
+)
+def cancelar_comision_plataforma(
+    id_comision: int,
+    payload: CancelarComisionRequest,
+    current_user: Usuario = Depends(require_roles("ADMIN")),
+    db: Session = Depends(get_db),
+):
+    try:
+        return cancelar_comision_plataforma_service(
+            db,
+            id_comision,
+            current_user,
+            observacion=payload.observacion,
+        )
+    except CommissionNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(exc),
+        ) from exc
+    except (CommissionInvalidTransitionError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Ocurrio un error inesperado al cancelar la comision.",
         ) from exc

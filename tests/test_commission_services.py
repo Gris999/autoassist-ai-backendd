@@ -70,6 +70,19 @@ def test_liquidar_comision_desde_pendiente_usa_misma_fecha_y_crea_historial(monk
 
     monkeypatch.setattr(ia_service, "update_comision_plataforma_estado_operativo", fake_update)
     monkeypatch.setattr(ia_service, "create_historial_comision_plataforma", fake_history)
+    monkeypatch.setattr(
+        ia_service,
+        "get_comision_plataforma_by_id_with_history",
+        lambda db, id_comision: comision,
+    )
+    monkeypatch.setattr(
+        ia_service,
+        "_to_comision_detail_response",
+        lambda commission_obj: SimpleNamespace(
+            id_comision=commission_obj.id_comision,
+            estado=commission_obj.estado,
+        ),
+    )
 
     result = ia_service.liquidar_comision_plataforma_service(
         db,
@@ -79,8 +92,8 @@ def test_liquidar_comision_desde_pendiente_usa_misma_fecha_y_crea_historial(monk
         observacion="Liquidada por admin",
     )
 
-    assert result is comision
     assert result.estado == COMMISSION_STATE_SETTLED
+    assert result.id_comision == comision.id_comision
     assert calls["update"]["estado_nuevo"] == COMMISSION_STATE_SETTLED
     assert calls["update"]["id_usuario_actor"] == 99
     assert calls["update"]["referencia"] == "LQ-001"
@@ -132,6 +145,19 @@ def test_observar_comision_desde_pendiente_hace_strip_y_no_envia_fecha_liquidaci
         ia_service,
         "create_historial_comision_plataforma",
         fake_history,
+    )
+    monkeypatch.setattr(
+        ia_service,
+        "get_comision_plataforma_by_id_with_history",
+        lambda db, id_comision: comision,
+    )
+    monkeypatch.setattr(
+        ia_service,
+        "_to_comision_detail_response",
+        lambda commission_obj: SimpleNamespace(
+            id_comision=commission_obj.id_comision,
+            estado=commission_obj.estado,
+        ),
     )
 
     ia_service.observar_comision_plataforma_service(
@@ -188,6 +214,19 @@ def test_cancelar_comision_desde_pendiente_hace_strip_y_no_limpia_referencia(mon
         "create_historial_comision_plataforma",
         fake_history,
     )
+    monkeypatch.setattr(
+        ia_service,
+        "get_comision_plataforma_by_id_with_history",
+        lambda db, id_comision: comision,
+    )
+    monkeypatch.setattr(
+        ia_service,
+        "_to_comision_detail_response",
+        lambda commission_obj: SimpleNamespace(
+            id_comision=commission_obj.id_comision,
+            estado=commission_obj.estado,
+        ),
+    )
 
     ia_service.cancelar_comision_plataforma_service(
         db,
@@ -227,6 +266,19 @@ def test_liquidar_comision_desde_observada_permitido(monkeypatch):
         ia_service,
         "create_historial_comision_plataforma",
         lambda db, **kwargs: SimpleNamespace(**kwargs),
+    )
+    monkeypatch.setattr(
+        ia_service,
+        "get_comision_plataforma_by_id_with_history",
+        lambda db, id_comision: SimpleNamespace(id_comision=id_comision, estado=COMMISSION_STATE_SETTLED),
+    )
+    monkeypatch.setattr(
+        ia_service,
+        "_to_comision_detail_response",
+        lambda commission_obj: SimpleNamespace(
+            id_comision=commission_obj.id_comision,
+            estado=commission_obj.estado,
+        ),
     )
 
     result = ia_service.liquidar_comision_plataforma_service(

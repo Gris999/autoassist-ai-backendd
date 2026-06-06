@@ -48,6 +48,7 @@ from app.modules.inteligencia_gestion_estrategica.repository import (
     get_cliente_by_id,
     get_comision_plataforma_by_id,
     get_comision_plataforma_by_id_for_update,
+    get_comision_plataforma_by_id_with_history,
     get_evidencia_by_id_and_incidente_id,
     get_evidencia_textos_by_incidente_id,
     get_estado_servicio_by_nombre,
@@ -86,6 +87,7 @@ from app.modules.inteligencia_gestion_estrategica.schemas import (
     ComisionPlataformaGenerateRequest,
     ComisionPlataformaGenerateResponse,
     ComisionPlataformaListResponse,
+    HistorialComisionPlataformaResponse,
     EvidenciaProcesadaResponse,
     GeminiTallerRankingResult,
     MetricaIncidenteDetailResponse,
@@ -2629,6 +2631,11 @@ def _to_comision_list_response(comision) -> ComisionPlataformaListResponse:
         fecha_pago=pago.fecha_pago,
         fecha_calculo=comision.fecha_calculo,
         referencia_transaccion=pago.referencia_transaccion,
+        fecha_liquidacion=comision.fecha_liquidacion,
+        observacion_estado=comision.observacion_estado,
+        referencia_liquidacion=comision.referencia_liquidacion,
+        id_usuario_ultima_accion=comision.id_usuario_ultima_accion,
+        fecha_ultima_accion=comision.fecha_ultima_accion,
     )
 
 
@@ -2653,6 +2660,19 @@ def _to_comision_detail_response(comision) -> ComisionPlataformaDetailResponse:
                 ),
             )
             for detalle in pago.detalles_pago
+        ],
+        historial=[
+            HistorialComisionPlataformaResponse(
+                id_historial_comision=historial.id_historial_comision,
+                id_comision=historial.id_comision,
+                estado_anterior=historial.estado_anterior,
+                estado_nuevo=historial.estado_nuevo,
+                observacion=historial.observacion,
+                referencia=historial.referencia,
+                id_usuario_actor=historial.id_usuario_actor,
+                fecha_hora=historial.fecha_hora,
+            )
+            for historial in getattr(comision, "historial", [])
         ],
     )
 
@@ -2741,7 +2761,13 @@ def liquidar_comision_plataforma_service(
             fecha_hora=ahora,
         )
         db.commit()
-        return comision_actualizada
+        comision_detalle = get_comision_plataforma_by_id_with_history(
+            db,
+            comision_actualizada.id_comision,
+        )
+        if not comision_detalle:
+            raise CommissionNotFoundError("La comision especificada no existe.")
+        return _to_comision_detail_response(comision_detalle)
     except Exception:
         db.rollback()
         raise
@@ -2786,7 +2812,13 @@ def observar_comision_plataforma_service(
             fecha_hora=ahora,
         )
         db.commit()
-        return comision_actualizada
+        comision_detalle = get_comision_plataforma_by_id_with_history(
+            db,
+            comision_actualizada.id_comision,
+        )
+        if not comision_detalle:
+            raise CommissionNotFoundError("La comision especificada no existe.")
+        return _to_comision_detail_response(comision_detalle)
     except Exception:
         db.rollback()
         raise
@@ -2831,7 +2863,13 @@ def cancelar_comision_plataforma_service(
             fecha_hora=ahora,
         )
         db.commit()
-        return comision_actualizada
+        comision_detalle = get_comision_plataforma_by_id_with_history(
+            db,
+            comision_actualizada.id_comision,
+        )
+        if not comision_detalle:
+            raise CommissionNotFoundError("La comision especificada no existe.")
+        return _to_comision_detail_response(comision_detalle)
     except Exception:
         db.rollback()
         raise
